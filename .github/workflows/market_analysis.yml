@@ -83,7 +83,7 @@ jobs:
           REDDIT_USER_AGENT:      ${{ secrets.REDDIT_USER_AGENT }}
         run: |
           mkdir -p data
-          python core/analyzer.py ${{ steps.trigger.outputs.label }}
+          PYTHONPATH=$GITHUB_WORKSPACE python core/analyzer.py ${{ steps.trigger.outputs.label }}
 
       # ── 6. Upload results as artifact ─────────────────────────────────────────
       # Streamlit Cloud can read this, or you can download it manually.

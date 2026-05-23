@@ -1,0 +1,293 @@
+{
+  "run_at": "2026-05-23T23:51:38.842708",
+  "trigger": "manual",
+  "market": {
+    "SPY": {
+      "name": "S&P 500",
+      "current": 745.64,
+      "day_change_pct": 0.39,
+      "week_change_pct": 0.95
+    },
+    "QQQ": {
+      "name": "NASDAQ 100",
+      "current": 717.54,
+      "day_change_pct": 0.42,
+      "week_change_pct": 1.65
+    },
+    "SMH": {
+      "name": "Semiconductors",
+      "current": 576.32,
+      "day_change_pct": 1.49,
+      "week_change_pct": 5.52
+    },
+    "XLE": {
+      "name": "Energy",
+      "current": 59.49,
+      "day_change_pct": 0.61,
+      "week_change_pct": -1.8
+    },
+    "ARKQ": {
+      "name": "Autonomous Tech / AI",
+      "current": 136.25,
+      "day_change_pct": 2.09,
+      "week_change_pct": 3.56
+    },
+    "_meta": {
+      "overall_sentiment": "neutral",
+      "fetched_at": "2026-05-23T23:51:23.474856"
+    }
+  },
+  "macro": {
+    "macro_score": 6,
+    "fed_funds_rate": 3.64,
+    "inflation_yoy": 3.95,
+    "rate_environment": "neutral",
+    "inflation_status": "elevated"
+  },
+  "geo_risk": {
+    "index": 6,
+    "level": "medium"
+  },
+  "recommendations": [
+    {
+      "ticker": "AMD",
+      "company_name": "Advanced Micro Devices, Inc.",
+      "action": "new_pick",
+      "confidence": 7,
+      "current_price": 467.51,
+      "buy_range_low": 420.0,
+      "buy_range_high": 470.0,
+      "sell_target_low": 700.0,
+      "sell_target_high": 900.0,
+      "stop_loss": 370.0,
+      "suggested_pct_portfolio": 12.0,
+      "growth_potential_pct": 75.0,
+      "growth_timeline": "18-30 months",
+      "thesis": "AMD is a critical AI infrastructure play with its MI300X GPU gaining traction in data center workloads, competing directly with NVIDIA while its x86 CPU business gains server market share; the forward P/E of 36x is reasonable given the secular AI tailwind and potential for earnings acceleration over 2-3 years.",
+      "risks": [
+        "Trading at 52-week high with overbought RSI of 75.2 suggesting near-term pullback risk",
+        "Intense competition from NVIDIA in AI accelerators and Intel in CPUs could compress margins",
+        "Negative insider sentiment at -37.5 warrants monitoring"
+      ],
+      "catalysts": [
+        "MI300X/MI400 ramp driving data center revenue acceleration",
+        "Custom AI chip wins with hyperscalers (Microsoft, Meta)",
+        "PC refresh cycle boosting consumer GPU and CPU demand"
+      ],
+      "technical_score": 6,
+      "sentiment_score": 5,
+      "macro_score": 6,
+      "is_new_pick": 1
+    },
+    {
+      "ticker": "AVGO",
+      "company_name": "Broadcom Inc.",
+      "action": "new_pick",
+      "confidence": 9,
+      "current_price": 414.14,
+      "buy_range_low": 395.0,
+      "buy_range_high": 430.0,
+      "sell_target_low": 700.0,
+      "sell_target_high": 900.0,
+      "stop_loss": 340.0,
+      "suggested_pct_portfolio": 18.0,
+      "growth_potential_pct": 90.0,
+      "growth_timeline": "18-30 months",
+      "thesis": "Broadcom is a dominant AI infrastructure compounder with its custom ASIC business (XPUs for Google TPUs, Meta) growing explosively, and its VMware acquisition creating a massive recurring software revenue stream that should drive earnings compounding well above consensus over 2-3 years; PEG of 0.90 signals the stock is undervalued relative to its growth trajectory.",
+      "risks": [
+        "Heavy insider selling (-47%) may reflect valuation concerns at current levels",
+        "VMware integration execution risk could weigh on near-term cash flow",
+        "Concentration risk with a few hyperscaler customers driving custom ASIC revenue"
+      ],
+      "catalysts": [
+        "Custom AI ASIC revenue from Google and Meta scaling significantly in 2025-2026",
+        "VMware software transition to subscription model driving margin expansion",
+        "Analyst consensus target of $480 implies ~16% near-term upside with further re-rating potential"
+      ],
+      "technical_score": 7,
+      "sentiment_score": 5,
+      "macro_score": 7,
+      "is_new_pick": 1
+    },
+    {
+      "ticker": "FSLR",
+      "company_name": "First Solar, Inc.",
+      "action": "hold",
+      "confidence": 5,
+      "current_price": 257.85,
+      "buy_range_low": 210.0,
+      "buy_range_high": 240.0,
+      "sell_target_low": 300.0,
+      "sell_target_high": 360.0,
+      "stop_loss": 190.0,
+      "suggested_pct_portfolio": 0.0,
+      "growth_potential_pct": 25.0,
+      "growth_timeline": "18-24 months",
+      "thesis": "First Solar is the leading US-manufactured thin-film solar manufacturer benefiting from IRA incentives, but near-term headwinds from policy uncertainty under current administration and RSI at 74 suggesting the stock is near-term overbought reduce conviction for new entry at current price.",
+      "risks": [
+        "IRA subsidy rollback risk under current US administration could materially impair profitability",
+        "Analyst target of $243 is BELOW current price, suggesting limited near-term upside",
+        "RSI at 74.1 and price near upper Bollinger Band suggest overbought conditions"
+      ],
+      "catalysts": [
+        "Data center power demand boom driving utility-scale solar demand",
+        "US domestic manufacturing advantage if trade tariffs on Chinese panels persist",
+        "Re-entry opportunity on pullback to $210-240 range"
+      ],
+      "technical_score": 6,
+      "sentiment_score": 5,
+      "macro_score": 5,
+      "is_new_pick": 1
+    },
+    {
+      "ticker": "INTC",
+      "company_name": "Intel Corporation",
+      "action": "hold",
+      "confidence": 4,
+      "current_price": 119.84,
+      "buy_range_low": 95.0,
+      "buy_range_high": 115.0,
+      "sell_target_low": 150.0,
+      "sell_target_high": 180.0,
+      "stop_loss": 80.0,
+      "suggested_pct_portfolio": 0.0,
+      "growth_potential_pct": 30.0,
+      "growth_timeline": "24-36 months",
+      "thesis": "Intel is a deep turnaround story with new leadership restructuring the business and IFS (foundry) optionality, but the analyst consensus target of $87.86 is drastically below current price at $119.84 suggesting significant downside risk, and the near-zero revenue growth makes this unsuitable for Sayan's 300% return target.",
+      "risks": [
+        "Analyst consensus target of $87.86 implies ~27% DOWNSIDE from current price \u2014 a major red flag",
+        "No current P/E due to losses signals fundamental weakness; turnaround execution highly uncertain",
+        "TSMC and AMD gaining server market share continuously erodes Intel's competitive moat"
+      ],
+      "catalysts": [
+        "Intel 18A process node success could revive foundry business credibility",
+        "Positive insider sentiment at +44.7 is one of the few bullish signals",
+        "Potential strategic asset sales or restructuring unlocking value"
+      ],
+      "technical_score": 6,
+      "sentiment_score": 5,
+      "macro_score": 5,
+      "is_new_pick": 1
+    },
+    {
+      "ticker": "MRVL",
+      "company_name": "Marvell Technology, Inc.",
+      "action": "new_pick",
+      "confidence": 8,
+      "current_price": 196.33,
+      "buy_range_low": 170.0,
+      "buy_range_high": 200.0,
+      "sell_target_low": 350.0,
+      "sell_target_high": 500.0,
+      "stop_loss": 145.0,
+      "suggested_pct_portfolio": 14.0,
+      "growth_potential_pct": 120.0,
+      "growth_timeline": "18-30 months",
+      "thesis": "Marvell is a high-conviction AI infrastructure compounder as the dominant provider of custom AI silicon (XPUs) for Amazon and Microsoft, with its data center revenue growing at triple-digit rates and positioned to capture a significant share of the $100B+ custom ASIC opportunity over the next 2-3 years; the stock hitting 52-week highs with rising momentum confirms institutional accumulation.",
+      "risks": [
+        "Trading at 52-week high with PEG of 2.24 suggests growth expectations are richly priced in",
+        "Customer concentration risk \u2014 heavy dependence on Amazon AWS and Microsoft",
+        "Negative insider sentiment at -41.6 warrants monitoring"
+      ],
+      "catalysts": [
+        "Custom ASIC (XPU) ramp for Amazon Trainium and Microsoft Maia AI chips scaling in 2025-2026",
+        "5G infrastructure and optical networking recovery adding incremental revenue streams",
+        "Rising trend momentum (Google Trends score 10) indicating growing institutional and retail interest"
+      ],
+      "technical_score": 8,
+      "sentiment_score": 7,
+      "macro_score": 6,
+      "is_new_pick": 1
+    },
+    {
+      "ticker": "MU",
+      "company_name": "Micron Technology, Inc.",
+      "action": "new_pick",
+      "confidence": 8,
+      "current_price": 751.0,
+      "buy_range_low": 680.0,
+      "buy_range_high": 760.0,
+      "sell_target_low": 1100.0,
+      "sell_target_high": 1400.0,
+      "stop_loss": 580.0,
+      "suggested_pct_portfolio": 13.0,
+      "growth_potential_pct": 85.0,
+      "growth_timeline": "18-30 months",
+      "thesis": "Micron is the most attractively valued semiconductor stock with a forward P/E of just 7.3x and PEG of 0.26, driven by explosive HBM3E memory demand for AI accelerators \u2014 Micron is a critical supplier to NVIDIA's H100/H200/B200 GPUs and stands to benefit enormously from AI infrastructure capex cycles over the next 2-3 years.",
+      "risks": [
+        "Memory market is cyclical and could experience oversupply if AI capex slows unexpectedly",
+        "Geopolitical risk with Taiwan semiconductor supply chain and China-US tensions",
+        "Analyst consensus target of $613 is below current price suggesting near-term valuation risk"
+      ],
+      "catalysts": [
+        "HBM3E production ramp for NVIDIA Blackwell GPU platform significantly boosting ASPs and margins",
+        "AI data center memory content per server growing 5-10x versus traditional workloads",
+        "Earnings growth of 756% YoY confirming fundamental inflection point"
+      ],
+      "technical_score": 6,
+      "sentiment_score": 5,
+      "macro_score": 6,
+      "is_new_pick": 1
+    },
+    {
+      "ticker": "NVDA",
+      "company_name": "NVIDIA Corporation",
+      "action": "new_pick",
+      "confidence": 9,
+      "current_price": 215.33,
+      "buy_range_low": 195.0,
+      "buy_range_high": 225.0,
+      "sell_target_low": 400.0,
+      "sell_target_high": 550.0,
+      "stop_loss": 165.0,
+      "suggested_pct_portfolio": 20.0,
+      "growth_potential_pct": 130.0,
+      "growth_timeline": "18-30 months",
+      "thesis": "NVIDIA is the undisputed backbone of AI infrastructure with its CUDA ecosystem creating a near-unassailable moat, and with Blackwell GPU demand significantly exceeding supply, hyperscaler capex commitments exceeding $300B in 2025 alone virtually guarantee multi-year revenue and earnings compounding that supports Sayan's 300% return target; the forward P/E of 17x is remarkably cheap for this growth profile.",
+      "risks": [
+        "Significant insider selling (-79.5%) is a notable caution flag at current levels",
+        "US export restrictions on advanced chips to China could reduce addressable market by 15-20%",
+        "Custom ASIC competition from Broadcom, Marvell, and AMD could erode market share over time"
+      ],
+      "catalysts": [
+        "Blackwell GB200/GB300 NVL72 rack-scale systems ramping with massive margin uplift",
+        "NVIDIA software ecosystem (CUDA, NIM, NeMo) creating recurring software revenue streams",
+        "Analyst target of $294 implies 37% near-term upside with further re-rating potential as earnings accelerate"
+      ],
+      "technical_score": 6,
+      "sentiment_score": 6,
+      "macro_score": 7,
+      "is_new_pick": 1
+    },
+    {
+      "ticker": "TSMC",
+      "company_name": "Taiwan Semiconductor Manufacturing Company",
+      "action": "hold",
+      "confidence": 3,
+      "current_price": 0.0,
+      "buy_range_low": 0.0,
+      "buy_range_high": 0.0,
+      "sell_target_low": 0.0,
+      "sell_target_high": 0.0,
+      "stop_loss": 0.0,
+      "suggested_pct_portfolio": 0.0,
+      "growth_potential_pct": 0.0,
+      "growth_timeline": "N/A",
+      "thesis": "TSMC data is currently unavailable for analysis; while TSMC is fundamentally the world's most critical semiconductor foundry and a core AI infrastructure enabler, no actionable recommendation can be made without current price, valuation, and technical data \u2014 revisit when data is available.",
+      "risks": [
+        "No market data available to assess current valuation or technical setup",
+        "Taiwan geopolitical risk remains the single largest systemic risk for the global semiconductor supply chain",
+        "Data unavailability prevents proper risk-reward analysis"
+      ],
+      "catalysts": [
+        "Arizona fab expansion reducing geopolitical risk premium could drive re-rating",
+        "CoWoS advanced packaging capacity expansion directly enabling NVIDIA and AMD AI chip production",
+        "Secular AI infrastructure capex boom driving leading-edge wafer demand at N3/N2 nodes"
+      ],
+      "technical_score": 0,
+      "sentiment_score": 5,
+      "macro_score": 5,
+      "is_new_pick": 0
+    }
+  ]
+}

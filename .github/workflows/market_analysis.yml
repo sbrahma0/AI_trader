@@ -1,0 +1,113 @@
+name: Market Analysis
+
+# ── SCHEDULE ──────────────────────────────────────────────────────────────────
+# Runs twice on every trading day (Mon–Fri):
+#   - 13:35 UTC = 9:35 AM ET (5 min after market open — data settles)
+#   - 21:05 UTC = 4:05 PM ET (5 min after market close — final prices)
+# Also manually triggerable from GitHub Actions UI.
+
+on:
+  schedule:
+    - cron: '35 13 * * 1-5'   # 9:35 AM ET (market open)
+    - cron: '05 21 * * 1-5'   # 4:05 PM ET (market close)
+  workflow_dispatch:
+    inputs:
+      trigger:
+        description: 'Trigger label (e.g. manual, test)'
+        required: false
+        default: 'manual'
+
+jobs:
+  analyze:
+    name: Run AI Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ── 2. Python setup ───────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── 3. Restore persisted database ─────────────────────────────────────────
+      # We store the SQLite DB as a GitHub Actions cache so history persists
+      # across runs. The cache key rotates weekly to avoid unbounded growth.
+      - name: Restore database cache
+        id: cache-db
+        uses: actions/cache@v4
+        with:
+          path: data/
+          key: trader-db-${{ github.run_number }}
+          restore-keys: |
+            trader-db-
+
+      # ── 4. Determine trigger label ────────────────────────────────────────────
+      - name: Set trigger label
+        id: trigger
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "label=${{ github.event.inputs.trigger }}" >> $GITHUB_OUTPUT
+          else
+            HOUR=$(date -u +%H)
+            if [[ "$HOUR" -le "14" ]]; then
+              echo "label=market_open" >> $GITHUB_OUTPUT
+            else
+              echo "label=market_close" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      # ── 5. Run analysis ───────────────────────────────────────────────────────
+      - name: Run AI analysis pipeline
+        env:
+          ANTHROPIC_API_KEY:      ${{ secrets.ANTHROPIC_API_KEY }}
+          FINNHUB_API_KEY:        ${{ secrets.FINNHUB_API_KEY }}
+          ALPHA_VANTAGE_KEY:      ${{ secrets.ALPHA_VANTAGE_KEY }}
+          NEWS_API_KEY:           ${{ secrets.NEWS_API_KEY }}
+          FRED_API_KEY:           ${{ secrets.FRED_API_KEY }}
+          REDDIT_CLIENT_ID:       ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET:   ${{ secrets.REDDIT_CLIENT_SECRET }}
+          REDDIT_USER_AGENT:      ${{ secrets.REDDIT_USER_AGENT }}
+        run: |
+          mkdir -p data
+          python core/analyzer.py ${{ steps.trigger.outputs.label }}
+
+      # ── 6. Upload results as artifact ─────────────────────────────────────────
+      # Streamlit Cloud can read this, or you can download it manually.
+      - name: Upload results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: analysis-results-${{ github.run_number }}
+          path: |
+            data/latest_results.json
+            data/trader.db
+          retention-days: 30
+
+      # ── 7. Commit latest_results.json back to repo ────────────────────────────
+      # This allows Streamlit Cloud to read the latest results directly from repo.
+      - name: Commit results to repo
+        run: |
+          git config user.name  "AI Trader Bot"
+          git config user.email "bot@ai-trader"
+          git add -f data/latest_results.json || true
+          git diff --cached --quiet || git commit -m "chore: analysis run ${{ steps.trigger.outputs.label }} $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 8. Push notifications (Phase 3) ──────────────────────────────────────
+      # Notifications will be added in Phase 3. Options being evaluated:
+      #   - Pushover (mobile push, free app / one-time $5)
+      #   - Email via SendGrid (free tier)
+      #   - Telegram bot (free)
+      # Nothing to do here yet.

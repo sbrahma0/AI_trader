@@ -1,0 +1,1 @@
+# AI Trader core package

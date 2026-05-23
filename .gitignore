@@ -1,0 +1,25 @@
+# Secrets
+.env
+
+# Database (don't commit — keep local or use GitHub Actions artifact)
+data/
+!data/latest_results.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Uploads (brokerage statements are personal)
+uploads/
+*.pdf

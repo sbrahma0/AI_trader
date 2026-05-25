@@ -1,15 +1,13 @@
 name: Market Analysis
 
 # ── SCHEDULE ──────────────────────────────────────────────────────────────────
-# Runs twice on every trading day (Mon–Fri):
+# Runs once every Tuesday at market open:
 #   - 13:35 UTC = 9:35 AM ET (5 min after market open — data settles)
-#   - 21:05 UTC = 4:05 PM ET (5 min after market close — final prices)
 # Also manually triggerable from GitHub Actions UI.
 
 on:
   schedule:
-    - cron: '35 13 * * 1-5'   # 9:35 AM ET (market open)
-    - cron: '05 21 * * 1-5'   # 4:05 PM ET (market close)
+    - cron: '35 13 * * 2'   # 9:35 AM ET every Tuesday
   workflow_dispatch:
     inputs:
       trigger:

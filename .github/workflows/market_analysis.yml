@@ -43,19 +43,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # ── 3. Restore persisted database ─────────────────────────────────────────
-      # We store the SQLite DB as a GitHub Actions cache so history persists
-      # across runs. The cache key rotates weekly to avoid unbounded growth.
-      - name: Restore database cache
-        id: cache-db
-        uses: actions/cache@v4.2.3
-        with:
-          path: data/
-          key: trader-db-${{ github.run_number }}
-          restore-keys: |
-            trader-db-
-
-      # ── 4. Determine trigger label ────────────────────────────────────────────
+      # ── 3. Determine trigger label ────────────────────────────────────────────
       - name: Set trigger label
         id: trigger
         run: |
@@ -73,6 +61,7 @@ jobs:
       # ── 5. Run analysis ───────────────────────────────────────────────────────
       - name: Run AI analysis pipeline
         env:
+          DATABASE_URL:           ${{ secrets.DATABASE_URL }}
           ANTHROPIC_API_KEY:      ${{ secrets.ANTHROPIC_API_KEY }}
           FINNHUB_API_KEY:        ${{ secrets.FINNHUB_API_KEY }}
           ALPHA_VANTAGE_KEY:      ${{ secrets.ALPHA_VANTAGE_KEY }}

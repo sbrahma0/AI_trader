@@ -1,5 +1,5 @@
 """
-database.py — SQLite schema and all DB operations for AI Trader.
+database.py — PostgreSQL (Supabase) schema and all DB operations for AI Trader.
 
 Tables:
   user_profile       — investment goals, risk tolerance, targets
@@ -15,21 +15,62 @@ Tables:
   research_results   — cached on-demand research (stock or sector)
 """
 
-import sqlite3
+import psycopg2
+import psycopg2.extras
+import os
+import re
 import json
 from datetime import datetime
-from pathlib import Path
+from dotenv import load_dotenv
 
-DB_PATH = Path(__file__).parent.parent / "data" / "trader.db"
+load_dotenv()
+
+_DATABASE_URL = os.getenv("DATABASE_URL", "")
+# Supabase requires SSL; append if not already specified
+if _DATABASE_URL and "sslmode" not in _DATABASE_URL:
+    _DATABASE_URL += "?sslmode=require"
 
 
-def get_connection():
-    DB_PATH.parent.mkdir(exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+class _Conn:
+    """
+    Thin sqlite3-compatible wrapper around a psycopg2 connection.
+
+    Translates sqlite3 call patterns so every CRUD function below
+    works without modification:
+      - positional ?  → %s
+      - named :param  → %(param)s
+      - fetchone/fetchall return dict-like RealDictRow objects
+    """
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, params=None):
+        if params is None:
+            params = ()
+        if isinstance(params, dict):
+            sql = re.sub(r":(\w+)", r"%(\1)s", sql)
+        else:
+            sql = sql.replace("?", "%s")
+        cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(sql, params)
+        return cur
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type:
+            self._conn.rollback()
+        else:
+            self._conn.commit()
+        self._conn.close()
+        return False
+
+
+def get_connection() -> _Conn:
+    conn = psycopg2.connect(_DATABASE_URL)
+    return _Conn(conn)
 
 
 def migrate_add_columns():
@@ -42,17 +83,18 @@ def migrate_add_columns():
     with get_connection() as conn:
         for table, col, typedef in migrations:
             try:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typedef}")
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {typedef}")
             except Exception:
-                pass  # column already exists
+                pass  # already exists
 
 
 def init_db():
     """Create all tables if they don't exist, then run column migrations."""
-    with get_connection() as conn:
-        conn.executescript("""
-        -- ── USER PROFILE ─────────────────────────────────────────────────────
-        CREATE TABLE IF NOT EXISTS user_profile (
+    # Execute each DDL statement individually — psycopg2 doesn't support
+    # multi-statement strings, and DDL order matters for FK constraints.
+    stmts = [
+        # ── USER PROFILE ──────────────────────────────────────────────────────
+        """CREATE TABLE IF NOT EXISTS user_profile (
             id                   INTEGER PRIMARY KEY DEFAULT 1,
             name                 TEXT    DEFAULT 'Sayan',
             investment_goal      TEXT    DEFAULT 'Maximize profit — beat SPY and QQQ',
@@ -65,13 +107,12 @@ def init_db():
             notes                TEXT,
             active_strategy_file TEXT    DEFAULT NULL,
             updated_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
+        )""",
+        "INSERT INTO user_profile (id) VALUES (1) ON CONFLICT (id) DO NOTHING",
 
-        INSERT OR IGNORE INTO user_profile (id) VALUES (1);
-
-        -- ── PORTFOLIO (current holdings) ──────────────────────────────────────
-        CREATE TABLE IF NOT EXISTS portfolio (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        # ── PORTFOLIO (current holdings) ──────────────────────────────────────
+        """CREATE TABLE IF NOT EXISTS portfolio (
+            id              SERIAL PRIMARY KEY,
             ticker          TEXT    NOT NULL UNIQUE,
             company_name    TEXT,
             shares          REAL    NOT NULL DEFAULT 0,
@@ -82,11 +123,11 @@ def init_db():
             added_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             notes           TEXT
-        );
+        )""",
 
-        -- ── PORTFOLIO HISTORY (snapshots) ─────────────────────────────────────
-        CREATE TABLE IF NOT EXISTS portfolio_history (
-            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        # ── PORTFOLIO HISTORY (snapshots) ─────────────────────────────────────
+        """CREATE TABLE IF NOT EXISTS portfolio_history (
+            id                SERIAL PRIMARY KEY,
             snapshot_date     DATE    NOT NULL,
             ticker            TEXT    NOT NULL,
             shares            REAL,
@@ -94,60 +135,44 @@ def init_db():
             price_at_snapshot REAL,
             total_value       REAL,
             source            TEXT    DEFAULT 'manual'
-        );
+        )""",
 
-        -- ── ACTION LOG (user trade journal) ───────────────────────────────────
-        CREATE TABLE IF NOT EXISTS action_log (
-            id               INTEGER PRIMARY KEY AUTOINCREMENT,
-            action_date      DATE    NOT NULL DEFAULT (date('now')),
-            ticker           TEXT    NOT NULL,
-            action           TEXT    NOT NULL CHECK(action IN ('buy','sell','hold_noted','watchlist_add','watchlist_remove')),
-            shares           REAL,
-            price_per_share  REAL,
-            total_value      REAL    GENERATED ALWAYS AS (shares * price_per_share) VIRTUAL,
-            was_system_suggested INTEGER DEFAULT 0,
-            rec_id           INTEGER REFERENCES recommendations(id),
-            my_reasoning     TEXT,
-            outcome_notes    TEXT,
-            created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        -- ── WATCHLIST (individual stocks) ─────────────────────────────────────
-        CREATE TABLE IF NOT EXISTS watchlist (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        # ── WATCHLIST (individual stocks) ─────────────────────────────────────
+        """CREATE TABLE IF NOT EXISTS watchlist (
+            id              SERIAL PRIMARY KEY,
             ticker          TEXT    NOT NULL UNIQUE,
             company_name    TEXT,
             sector          TEXT,
             why_watching    TEXT,
             added_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             is_active       INTEGER DEFAULT 1
-        );
+        )""",
 
-        -- ── SECTOR WATCHLIST ──────────────────────────────────────────────────
-        CREATE TABLE IF NOT EXISTS sector_watchlist (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        # ── SECTOR WATCHLIST ──────────────────────────────────────────────────
+        """CREATE TABLE IF NOT EXISTS sector_watchlist (
+            id              SERIAL PRIMARY KEY,
             sector_name     TEXT    NOT NULL UNIQUE,
             why_watching    TEXT,
-            key_stocks      TEXT    DEFAULT '[]',   -- JSON array of tickers
-            key_events      TEXT    DEFAULT '[]',   -- JSON array of event strings
+            key_stocks      TEXT    DEFAULT '[]',
+            key_events      TEXT    DEFAULT '[]',
             last_analyzed   TIMESTAMP,
             is_active       INTEGER DEFAULT 1
-        );
+        )""",
 
-        -- ── BROKER ACCOUNTS ───────────────────────────────────────────────────
-        CREATE TABLE IF NOT EXISTS broker_accounts (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        # ── BROKER ACCOUNTS ───────────────────────────────────────────────────
+        """CREATE TABLE IF NOT EXISTS broker_accounts (
+            id              SERIAL PRIMARY KEY,
             broker_name     TEXT    NOT NULL,
-            account_type    TEXT    DEFAULT 'taxable',  -- taxable, ira, roth_ira, 401k
+            account_type    TEXT    DEFAULT 'taxable',
             cash_balance    REAL    DEFAULT 0,
             total_value     REAL    DEFAULT 0,
             updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             notes           TEXT
-        );
+        )""",
 
-        -- ── ANALYSIS RUNS ─────────────────────────────────────────────────────
-        CREATE TABLE IF NOT EXISTS analysis_runs (
-            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        # ── ANALYSIS RUNS ─────────────────────────────────────────────────────
+        """CREATE TABLE IF NOT EXISTS analysis_runs (
+            id               SERIAL PRIMARY KEY,
             run_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             trigger          TEXT    DEFAULT 'manual',
             market_summary   TEXT,
@@ -157,11 +182,11 @@ def init_db():
             status           TEXT    DEFAULT 'pending',
             error_message    TEXT,
             duration_secs    REAL
-        );
+        )""",
 
-        -- ── RECOMMENDATIONS ───────────────────────────────────────────────────
-        CREATE TABLE IF NOT EXISTS recommendations (
-            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+        # ── RECOMMENDATIONS ───────────────────────────────────────────────────
+        """CREATE TABLE IF NOT EXISTS recommendations (
+            id                      SERIAL PRIMARY KEY,
             run_id                  INTEGER NOT NULL REFERENCES analysis_runs(id),
             ticker                  TEXT    NOT NULL,
             company_name            TEXT,
@@ -184,60 +209,93 @@ def init_db():
             sentiment_score         INTEGER,
             macro_score             INTEGER,
             is_new_pick             INTEGER DEFAULT 0,
-            horizon                 TEXT    DEFAULT 'medium',  -- short / medium / long
-            play_type               TEXT    DEFAULT 'core',    -- core / momentum / seasonal
+            horizon                 TEXT    DEFAULT 'medium',
+            play_type               TEXT    DEFAULT 'core',
             created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
+        )""",
 
-        -- ── RECOMMENDATION FEEDBACK ───────────────────────────────────────────
-        CREATE TABLE IF NOT EXISTS rec_feedback (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        # ── RECOMMENDATION FEEDBACK ───────────────────────────────────────────
+        """CREATE TABLE IF NOT EXISTS rec_feedback (
+            id              SERIAL PRIMARY KEY,
             rec_id          INTEGER NOT NULL REFERENCES recommendations(id),
             was_accurate    INTEGER,
             user_comment    TEXT,
             judged_at       TIMESTAMP
-        );
+        )""",
 
-        -- ── RESEARCH RESULTS (cached on-demand analysis) ──────────────────────
-        CREATE TABLE IF NOT EXISTS research_results (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        # ── ACTION LOG (user trade journal) ───────────────────────────────────
+        # Created after recommendations so the FK ref resolves.
+        # total_value is STORED generated column (PostgreSQL 12+).
+        """CREATE TABLE IF NOT EXISTS action_log (
+            id               SERIAL PRIMARY KEY,
+            action_date      DATE    NOT NULL DEFAULT CURRENT_DATE,
+            ticker           TEXT    NOT NULL,
+            action           TEXT    NOT NULL CHECK(action IN ('buy','sell','hold_noted','watchlist_add','watchlist_remove')),
+            shares           REAL,
+            price_per_share  REAL,
+            total_value      REAL    GENERATED ALWAYS AS (shares * price_per_share) STORED,
+            was_system_suggested INTEGER DEFAULT 0,
+            rec_id           INTEGER REFERENCES recommendations(id),
+            my_reasoning     TEXT,
+            outcome_notes    TEXT,
+            created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""",
+
+        # ── RESEARCH RESULTS (cached on-demand analysis) ──────────────────────
+        """CREATE TABLE IF NOT EXISTS research_results (
+            id              SERIAL PRIMARY KEY,
             subject         TEXT    NOT NULL,
-            subject_type    TEXT    DEFAULT 'stock',  -- stock / sector
+            subject_type    TEXT    DEFAULT 'stock',
             research_json   TEXT,
             created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
+        )""",
 
-        -- ── DEFAULT WATCHLIST ─────────────────────────────────────────────────
-        INSERT OR IGNORE INTO watchlist (ticker, company_name, sector) VALUES
-            ('NVDA',  'NVIDIA Corporation',          'AI Infrastructure'),
-            ('AMD',   'Advanced Micro Devices',      'AI Infrastructure'),
-            ('INTC',  'Intel Corporation',           'AI Infrastructure'),
-            ('MU',    'Micron Technology',           'AI Infrastructure'),
-            ('MRVL',  'Marvell Technology',          'AI Infrastructure'),
-            ('TSM',   'Taiwan Semiconductor',        'AI Infrastructure'),
-            ('AVGO',  'Broadcom Inc.',               'AI Infrastructure'),
-            ('IONQ',  'IonQ Inc.',                   'Quantum Computing'),
-            ('RGTI',  'Rigetti Computing',           'Quantum Computing'),
-            ('QUBT',  'Quantum Computing Inc.',      'Quantum Computing'),
-            ('RKLB',  'Rocket Lab USA',              'Space'),
-            ('ASTS',  'AST SpaceMobile',             'Space'),
-            ('NEE',   'NextEra Energy',              'Clean Energy'),
-            ('FSLR',  'First Solar',                 'Clean Energy'),
-            ('CEG',   'Constellation Energy',        'Nuclear Energy'),
-            ('VST',   'Vistra Corp',                 'Energy');
+        # ── DEFAULT WATCHLIST ─────────────────────────────────────────────────
+        """INSERT INTO watchlist (ticker, company_name, sector) VALUES
+            ('NVDA',  'NVIDIA Corporation',     'AI Infrastructure'),
+            ('AMD',   'Advanced Micro Devices', 'AI Infrastructure'),
+            ('INTC',  'Intel Corporation',      'AI Infrastructure'),
+            ('MU',    'Micron Technology',      'AI Infrastructure'),
+            ('MRVL',  'Marvell Technology',     'AI Infrastructure'),
+            ('TSM',   'Taiwan Semiconductor',   'AI Infrastructure'),
+            ('AVGO',  'Broadcom Inc.',          'AI Infrastructure'),
+            ('IONQ',  'IonQ Inc.',              'Quantum Computing'),
+            ('RGTI',  'Rigetti Computing',      'Quantum Computing'),
+            ('QUBT',  'Quantum Computing Inc.', 'Quantum Computing'),
+            ('RKLB',  'Rocket Lab USA',         'Space'),
+            ('ASTS',  'AST SpaceMobile',        'Space'),
+            ('NEE',   'NextEra Energy',         'Clean Energy'),
+            ('FSLR',  'First Solar',            'Clean Energy'),
+            ('CEG',   'Constellation Energy',   'Nuclear Energy'),
+            ('VST',   'Vistra Corp',            'Energy')
+            ON CONFLICT (ticker) DO NOTHING""",
 
-        -- ── DEFAULT SECTOR WATCHLIST ──────────────────────────────────────────
-        INSERT OR IGNORE INTO sector_watchlist (sector_name, why_watching, key_stocks) VALUES
-            ('AI Infrastructure', 'Core holding sector — data center buildout, GPU/chip demand', '["NVDA","AMD","AVGO","MU","MRVL","TSM"]'),
-            ('Quantum Computing',  'High-risk high-reward — early stage, watching for commercialization milestones', '["IONQ","RGTI","QUBT"]'),
-            ('Space',              'SpaceX IPO catalyst, satellite internet, defense contracts', '["RKLB","ASTS"]'),
-            ('Clean Energy',       'IRA tailwinds, nuclear renaissance, grid demand from AI data centers', '["CEG","VST","NEE","FSLR"]');
-        """)
+        # ── DEFAULT SECTOR WATCHLIST ──────────────────────────────────────────
+        """INSERT INTO sector_watchlist (sector_name, why_watching, key_stocks) VALUES
+            ('AI Infrastructure', 'Core holding sector — data center buildout, GPU/chip demand',          '["NVDA","AMD","AVGO","MU","MRVL","TSM"]'),
+            ('Quantum Computing',  'High-risk high-reward — early stage, watching for commercialization', '["IONQ","RGTI","QUBT"]'),
+            ('Space',              'SpaceX IPO catalyst, satellite internet, defense contracts',           '["RKLB","ASTS"]'),
+            ('Clean Energy',       'IRA tailwinds, nuclear renaissance, grid demand from AI data centers','["CEG","VST","NEE","FSLR"]')
+            ON CONFLICT (sector_name) DO NOTHING""",
+    ]
+
+    conn = psycopg2.connect(_DATABASE_URL)
+    try:
+        with conn.cursor() as cur:
+            for stmt in stmts:
+                cur.execute(stmt)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
     migrate_add_columns()
-    print(f"✅ Database initialized at {DB_PATH}")
+    print("✅ Database initialized at Supabase")
 
 
-# ── PORTFOLIO OPERATIONS ────────────────────────────────────────────────────
+# ── PORTFOLIO OPERATIONS ─────────────────────────────────────────────────────
 
 def upsert_holding(ticker, shares, avg_cost, company_name=None, sector=None, notes=None):
     with get_connection() as conn:
@@ -258,8 +316,8 @@ def get_portfolio():
     with get_connection() as conn:
         rows = conn.execute("""
             SELECT p.*,
-                   ROUND((p.current_price - p.avg_cost_basis) / NULLIF(p.avg_cost_basis, 0) * 100, 2) as pnl_pct,
-                   ROUND((p.current_price - p.avg_cost_basis) * p.shares, 2) as pnl_dollars
+                   ROUND(CAST((p.current_price - p.avg_cost_basis) / NULLIF(p.avg_cost_basis, 0) * 100 AS numeric), 2) as pnl_pct,
+                   ROUND(CAST((p.current_price - p.avg_cost_basis) * p.shares AS numeric), 2) as pnl_dollars
             FROM portfolio p
             ORDER BY p.shares * COALESCE(p.current_price, p.avg_cost_basis) DESC
         """).fetchall()
@@ -302,7 +360,7 @@ def snapshot_portfolio(source="manual"):
             """, (today, h["ticker"], h["shares"], h["avg_cost_basis"], price, h["shares"] * price, source))
 
 
-# ── BROKER ACCOUNT OPERATIONS ────────────────────────────────────────────────
+# ── BROKER ACCOUNT OPERATIONS ─────────────────────────────────────────────────
 
 def get_broker_accounts():
     with get_connection() as conn:
@@ -329,7 +387,7 @@ def delete_broker_account(account_id):
         conn.execute("DELETE FROM broker_accounts WHERE id=?", (account_id,))
 
 
-# ── SECTOR WATCHLIST OPERATIONS ─────────────────────────────────────────────
+# ── SECTOR WATCHLIST OPERATIONS ──────────────────────────────────────────────
 
 def get_sector_watchlist():
     with get_connection() as conn:
@@ -357,11 +415,12 @@ def upsert_sector(sector_name, why_watching=None, key_stocks=None, key_events=No
         """, (sector_name, why_watching, stocks_json, events_json))
 
 
-# ── ACTION LOG OPERATIONS ───────────────────────────────────────────────────
+# ── ACTION LOG OPERATIONS ────────────────────────────────────────────────────
 
 def log_action(ticker, action, shares, price, was_suggested=False, rec_id=None, reasoning=""):
     ticker = ticker.upper()
     with get_connection() as conn:
+        # total_value is a GENERATED column — omit from INSERT
         conn.execute("""
             INSERT INTO action_log (ticker, action, shares, price_per_share, was_system_suggested, rec_id, my_reasoning)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -405,7 +464,7 @@ def get_action_log(limit=50):
         return [dict(r) for r in rows]
 
 
-# ── RECOMMENDATIONS OPERATIONS ──────────────────────────────────────────────
+# ── RECOMMENDATIONS OPERATIONS ───────────────────────────────────────────────
 
 def save_recommendations(run_id, recs: list[dict]):
     with get_connection() as conn:
@@ -490,7 +549,7 @@ def get_sector_top_picks(n=3):
         return by_sector
 
 
-# ── RESEARCH RESULTS ─────────────────────────────────────────────────────────
+# ── RESEARCH RESULTS ──────────────────────────────────────────────────────────
 
 def get_research_result(subject: str, max_age_hours: int = 6):
     """Return cached research if it exists and is fresh enough."""
@@ -502,7 +561,10 @@ def get_research_result(subject: str, max_age_hours: int = 6):
         """, (subject,)).fetchone()
         if not row:
             return None
-        age_hours = (datetime.now() - datetime.fromisoformat(str(row["created_at"]))).total_seconds() / 3600
+        created = row["created_at"]
+        if not isinstance(created, datetime):
+            created = datetime.fromisoformat(str(created))
+        age_hours = (datetime.now() - created).total_seconds() / 3600
         if age_hours > max_age_hours:
             return None
         d = dict(row)
@@ -518,7 +580,7 @@ def save_research_result(subject: str, subject_type: str, research: dict):
         """, (subject.upper(), subject_type, json.dumps(research)))
 
 
-# ── USER PROFILE ─────────────────────────────────────────────────────────────
+# ── USER PROFILE ──────────────────────────────────────────────────────────────
 
 def get_user_profile():
     with get_connection() as conn:
@@ -529,10 +591,13 @@ def get_user_profile():
 def update_user_profile(**kwargs):
     if not kwargs:
         return
-    fields = ", ".join(f"{k}=?" for k in kwargs)
+    fields = ", ".join(f"{k}=%s" for k in kwargs)
     values = list(kwargs.values())
     with get_connection() as conn:
-        conn.execute(f"UPDATE user_profile SET {fields}, updated_at=CURRENT_TIMESTAMP WHERE id=1", values)
+        conn.execute(
+            f"UPDATE user_profile SET {fields}, updated_at=CURRENT_TIMESTAMP WHERE id=1",
+            values
+        )
 
 
 # ── WATCHLIST ─────────────────────────────────────────────────────────────────

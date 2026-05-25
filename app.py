@@ -472,7 +472,12 @@ with tab_lookout:
                 from core.database import get_connection
                 with get_connection() as conn:
                     conn.execute(
-                        "INSERT OR REPLACE INTO watchlist (ticker, company_name, sector, why_watching) VALUES (?,?,?,?)",
+                        """INSERT INTO watchlist (ticker, company_name, sector, why_watching)
+                           VALUES (?, ?, ?, ?)
+                           ON CONFLICT (ticker) DO UPDATE SET
+                               company_name = EXCLUDED.company_name,
+                               sector       = EXCLUDED.sector,
+                               why_watching = EXCLUDED.why_watching""",
                         (wl_ticker, wl_company, wl_sector, wl_reason)
                     )
                 st.success(f"Added {wl_ticker}")

@@ -120,8 +120,9 @@ def migrate():
     sq = sqlite3.connect(SQLITE_PATH)
     sq.row_factory = sqlite3.Row
 
-    # Connect to PostgreSQL (target)
-    pg = psycopg2.connect(DATABASE_URL)
+    # Connect to PostgreSQL (target) using the safe URL parser from database.py
+    from core.database import _connect
+    pg = _connect()
     pg.autocommit = False
     cur = pg.cursor()
 

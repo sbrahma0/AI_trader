@@ -26,9 +26,56 @@ from dotenv import load_dotenv
 load_dotenv()
 
 _DATABASE_URL = os.getenv("DATABASE_URL", "")
-# Supabase requires SSL; append if not already specified
-if _DATABASE_URL and "sslmode" not in _DATABASE_URL:
-    _DATABASE_URL += "?sslmode=require"
+
+
+def _connect():
+    """
+    Parse the DATABASE_URL and connect via keyword args so that
+    passwords containing special chars (@, ?, [, ], +) are handled
+    correctly without requiring URL-encoding.
+
+    Key insight: find the last @ FIRST to split userinfo from host,
+    then strip query params only from the host portion — never from
+    the userinfo where ? may appear inside the password.
+    """
+    url = _DATABASE_URL
+
+    # Remove scheme prefix
+    for prefix in ("postgresql://", "postgres://"):
+        if url.startswith(prefix):
+            url = url[len(prefix):]
+            break
+
+    # Split at LAST @ — handles @ inside passwords correctly
+    at = url.rfind("@")
+    userinfo = url[:at]
+    rest     = url[at + 1:]   # host:port/dbname?query
+
+    # Strip query string from the host portion only
+    sslmode = "require"
+    if "?" in rest:
+        rest, query = rest.split("?", 1)
+        for part in query.split("&"):
+            if part.startswith("sslmode="):
+                sslmode = part.split("=", 1)[1]
+
+    # user:password — split at first colon in userinfo
+    colon    = userinfo.find(":")
+    user     = userinfo[:colon] if colon != -1 else userinfo
+    password = userinfo[colon + 1:] if colon != -1 else ""
+
+    # host:port/dbname
+    slash     = rest.find("/")
+    host_port = rest[:slash] if slash != -1 else rest
+    dbname    = rest[slash + 1:] if slash != -1 else "postgres"
+    rcolon    = host_port.rfind(":")
+    host      = host_port[:rcolon] if rcolon != -1 else host_port
+    port      = int(host_port[rcolon + 1:]) if rcolon != -1 else 5432
+
+    return psycopg2.connect(
+        host=host, port=port, user=user,
+        password=password, dbname=dbname, sslmode=sslmode,
+    )
 
 
 class _Conn:
@@ -69,7 +116,7 @@ class _Conn:
 
 
 def get_connection() -> _Conn:
-    conn = psycopg2.connect(_DATABASE_URL)
+    conn = _connect()
     return _Conn(conn)
 
 
@@ -279,7 +326,7 @@ def init_db():
             ON CONFLICT (sector_name) DO NOTHING""",
     ]
 
-    conn = psycopg2.connect(_DATABASE_URL)
+    conn = _connect()
     try:
         with conn.cursor() as cur:
             for stmt in stmts:

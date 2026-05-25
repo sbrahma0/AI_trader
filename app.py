@@ -40,7 +40,11 @@ from core.database import (
 )
 from core.portfolio_parser import parse_file
 
-init_db()
+try:
+    init_db()
+except Exception as _db_err:
+    st.error(f"Database connection failed: {_db_err}")
+    st.stop()
 
 # ── CSS ────────────────────────────────────────────────────────────────────────
 st.markdown("""

@@ -1,17 +1,19 @@
 """
 analyzer.py — Main analysis orchestrator.
 
-Flow:
+Flow (multi-agent pipeline):
   1. Load portfolio + watchlist + user profile from DB
-  2. Fetch market overview (SPY, QQQ, VIX, sector ETFs)
-  3. For each stock: fetch market data, technicals, sentiment
-  4. Fetch macro snapshot + geopolitical risk
-  5. Build structured prompt → Claude Sonnet
-  6. Parse JSON response → save to DB as new analysis_run + recommendations
-  7. Optionally write latest_results.json for Streamlit to read
+  2. Fetch market overview, macro, geo, per-stock data
+  3. Run 5-agent pipeline:
+       Agent 1 (Haiku): Momentum signals
+       Agent 2 (Haiku): Macro/Geo regime
+       Agent 3 (Sonnet): Short-term scanner
+       Agent 4 (Sonnet): Long-term analyst
+       Agent 5 (Sonnet): Synthesis → final recommendations
+  4. Save recommendations to DB + write latest_results.json
 
-Run manually:  python core/analyzer.py
-Triggered by:  GitHub Actions (cron), or scheduled via local scheduler
+Run manually:  python core/analyzer.py [trigger] [--scope full|portfolio_only|watchlist_only|momentum_scan]
+Triggered by:  GitHub Actions (cron: no scope arg → defaults to 'full')
 """
 
 import os
@@ -111,7 +113,7 @@ def collect_all_data(trigger: str = "manual") -> dict:
     }
 
 
-# ── PROMPT BUILDER ─────────────────────────────────────────────────────────────
+# ── LEGACY: single-agent prompt builder (kept for reference, no longer called) ──
 
 def build_prompt(data: dict, tickers_subset: set | None = None) -> str:
     """
@@ -290,7 +292,7 @@ Return ONLY the JSON array.
     return prompt
 
 
-# ── CLAUDE API CALL ───────────────────────────────────────────────────────────
+# ── LEGACY: single Claude call (kept for reference, no longer called) ──────────
 
 def call_claude(prompt: str) -> list[dict]:
     """Send the analysis prompt to Claude and parse the JSON response."""
@@ -373,6 +375,14 @@ def save_run(data: dict, recommendations: list[dict]) -> int:
             return "sell"
         return "hold"
 
+    def _serialize(v):
+        """Ensure risks/catalysts are stored as JSON strings."""
+        if isinstance(v, list):
+            return json.dumps(v)
+        if isinstance(v, str):
+            return v  # already serialized by pipeline agents
+        return "[]"
+
     # Normalize recs — ensure required fields have defaults
     normalized = []
     portfolio_set = set(data["portfolio_tickers"])
@@ -380,8 +390,6 @@ def save_run(data: dict, recommendations: list[dict]) -> int:
         ticker = str(r.get("ticker", "")).upper().strip()
         if not ticker:
             continue
-        risks     = r.get("risks",     [])
-        catalysts = r.get("catalysts", [])
         normalized.append({
             "ticker":                  ticker,
             "company_name":            r.get("company_name", ""),
@@ -398,12 +406,14 @@ def save_run(data: dict, recommendations: list[dict]) -> int:
             "growth_potential_pct":    r.get("growth_potential_pct"),
             "growth_timeline":         r.get("growth_timeline", ""),
             "thesis":                  r.get("thesis", ""),
-            "risks":                   json.dumps(risks     if isinstance(risks,     list) else [risks]),
-            "catalysts":               json.dumps(catalysts if isinstance(catalysts, list) else [catalysts]),
+            "risks":                   _serialize(r.get("risks", [])),
+            "catalysts":               _serialize(r.get("catalysts", [])),
             "technical_score":         r.get("technical_score"),
             "sentiment_score":         r.get("sentiment_score"),
             "macro_score":             r.get("macro_score"),
             "is_new_pick":             int(r.get("is_new_pick", 0) or ticker not in portfolio_set),
+            "horizon":                 r.get("horizon", "medium"),
+            "play_type":               r.get("play_type", "core"),
         })
 
     save_recommendations(run_id, normalized)
@@ -442,11 +452,19 @@ def write_results_json(recommendations: list[dict], data: dict):
 
 # ── MAIN ENTRY POINT ──────────────────────────────────────────────────────────
 
-def run_analysis(trigger: str = "manual") -> int:
-    """Full pipeline: collect → prompt → Claude → save. Returns run_id."""
+def run_analysis(
+    trigger: str = "manual",
+    scope: str = "full",
+    tickers: list | None = None,
+) -> int:
+    """
+    Multi-agent pipeline: collect → 5 agents → save. Returns run_id.
+
+    scope:   'full' | 'portfolio_only' | 'watchlist_only' | 'momentum_scan'
+    tickers: explicit list overrides scope (used by Research tab)
+    """
     init_db()
 
-    # Mark run as started
     with get_connection() as conn:
         cursor = conn.execute(
             "INSERT INTO analysis_runs (trigger, status) VALUES (?, 'running')",
@@ -459,14 +477,8 @@ def run_analysis(trigger: str = "manual") -> int:
     try:
         data = collect_all_data(trigger=trigger)
 
-        all_tickers = list(data["stocks"].keys())
-        batches = [all_tickers[i:i+CLAUDE_BATCH_SIZE]
-                   for i in range(0, len(all_tickers), CLAUDE_BATCH_SIZE)]
-        recommendations = []
-        for idx, batch in enumerate(batches, 1):
-            print(f"\nClaude batch {idx}/{len(batches)}: {batch}")
-            prompt = build_prompt(data, tickers_subset=set(batch))
-            recommendations.extend(call_claude(prompt))
+        from core.agents.pipeline import run_pipeline
+        recommendations = run_pipeline(data, scope=scope, tickers_override=tickers)
 
         run_id = save_run(data, recommendations)
         write_results_json(recommendations, data)
@@ -477,7 +489,7 @@ def run_analysis(trigger: str = "manual") -> int:
                 UPDATE analysis_runs SET status='completed', duration_secs=? WHERE id=?
             """, (round(duration, 1), run_id))
 
-        print(f"\n✅ Analysis complete in {duration:.0f}s — {len(recommendations)} recommendations saved (run #{run_id})")
+        print(f"\n✅ Analysis complete in {duration:.0f}s — {len(recommendations)} recommendations (run #{run_id})")
         return run_id
 
     except Exception as e:
@@ -493,5 +505,13 @@ def run_analysis(trigger: str = "manual") -> int:
 
 if __name__ == "__main__":
     import sys
-    trigger = sys.argv[1] if len(sys.argv) > 1 else "manual"
-    run_analysis(trigger=trigger)
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("trigger", nargs="?", default="manual")
+    parser.add_argument("--scope",   default="full",
+                        choices=["full", "portfolio_only", "watchlist_only", "momentum_scan"])
+    parser.add_argument("--tickers", nargs="*", help="specific tickers to analyze")
+    args = parser.parse_args()
+
+    run_analysis(trigger=args.trigger, scope=args.scope, tickers=args.tickers)

@@ -6,10 +6,13 @@ Tables:
   portfolio          — current holdings (updated via action_log or PDF import)
   portfolio_history  — snapshots of portfolio over time
   action_log         — user-recorded trades (manual journal)
-  watchlist          — stocks to monitor beyond current holdings
+  watchlist          — individual stocks to monitor
+  sector_watchlist   — whole sectors to track (Space, Quantum, etc.)
+  broker_accounts    — cash and account balances per broker
   analysis_runs      — record of every analysis execution
   recommendations    — per-stock recommendations from each run
-  rec_feedback       — user feedback on recommendations (was it right?)
+  rec_feedback       — user feedback on recommendations
+  research_results   — cached on-demand research (stock or sector)
 """
 
 import sqlite3
@@ -29,23 +32,39 @@ def get_connection():
     return conn
 
 
+def migrate_add_columns():
+    """Idempotent migrations for columns added after initial schema creation."""
+    migrations = [
+        ("recommendations", "horizon",               "TEXT DEFAULT 'medium'"),
+        ("recommendations", "play_type",             "TEXT DEFAULT 'core'"),
+        ("user_profile",    "active_strategy_file",  "TEXT DEFAULT NULL"),
+    ]
+    with get_connection() as conn:
+        for table, col, typedef in migrations:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typedef}")
+            except Exception:
+                pass  # column already exists
+
+
 def init_db():
-    """Create all tables if they don't exist."""
+    """Create all tables if they don't exist, then run column migrations."""
     with get_connection() as conn:
         conn.executescript("""
         -- ── USER PROFILE ─────────────────────────────────────────────────────
         CREATE TABLE IF NOT EXISTS user_profile (
-            id               INTEGER PRIMARY KEY DEFAULT 1,
-            name             TEXT    DEFAULT 'Sayan',
-            investment_goal  TEXT    DEFAULT 'Exponential growth over 2-3 years',
-            risk_tolerance   TEXT    DEFAULT 'medium-high',
-            time_horizon     TEXT    DEFAULT '2-3 years',
-            strategy         TEXT    DEFAULT 'No day trading. Long-term positions.',
-            preferred_sectors TEXT   DEFAULT '["AI infrastructure","Energy","Quantum","Space"]',
-            avoided_sectors  TEXT    DEFAULT '[]',
-            target_return    REAL    DEFAULT 300.0,   -- % target (300 = 3x)
-            notes            TEXT,
-            updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            id                   INTEGER PRIMARY KEY DEFAULT 1,
+            name                 TEXT    DEFAULT 'Sayan',
+            investment_goal      TEXT    DEFAULT 'Maximize profit — beat SPY and QQQ',
+            risk_tolerance       TEXT    DEFAULT 'medium-high',
+            time_horizon         TEXT    DEFAULT 'flexible — short or long depending on opportunity',
+            strategy             TEXT    DEFAULT 'Beat S&P 500 and NASDAQ 100. Long or short term — whatever maximizes return.',
+            preferred_sectors    TEXT    DEFAULT '["AI Infrastructure","Energy","Quantum","Space"]',
+            avoided_sectors      TEXT    DEFAULT '[]',
+            target_return        REAL    DEFAULT 300.0,
+            notes                TEXT,
+            active_strategy_file TEXT    DEFAULT NULL,
+            updated_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
         INSERT OR IGNORE INTO user_profile (id) VALUES (1);
@@ -56,10 +75,10 @@ def init_db():
             ticker          TEXT    NOT NULL UNIQUE,
             company_name    TEXT,
             shares          REAL    NOT NULL DEFAULT 0,
-            avg_cost_basis  REAL,           -- average cost per share
-            current_price   REAL,           -- updated on each analysis run
+            avg_cost_basis  REAL,
+            current_price   REAL,
             sector          TEXT,
-            asset_type      TEXT    DEFAULT 'stock',  -- stock, etf, crypto
+            asset_type      TEXT    DEFAULT 'stock',
             added_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             notes           TEXT
@@ -67,33 +86,33 @@ def init_db():
 
         -- ── PORTFOLIO HISTORY (snapshots) ─────────────────────────────────────
         CREATE TABLE IF NOT EXISTS portfolio_history (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            snapshot_date   DATE    NOT NULL,
-            ticker          TEXT    NOT NULL,
-            shares          REAL,
-            avg_cost_basis  REAL,
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_date     DATE    NOT NULL,
+            ticker            TEXT    NOT NULL,
+            shares            REAL,
+            avg_cost_basis    REAL,
             price_at_snapshot REAL,
-            total_value     REAL,
-            source          TEXT    DEFAULT 'manual'  -- 'pdf_import', 'manual', 'action_log'
+            total_value       REAL,
+            source            TEXT    DEFAULT 'manual'
         );
 
         -- ── ACTION LOG (user trade journal) ───────────────────────────────────
         CREATE TABLE IF NOT EXISTS action_log (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            action_date     DATE    NOT NULL DEFAULT (date('now')),
-            ticker          TEXT    NOT NULL,
-            action          TEXT    NOT NULL CHECK(action IN ('buy','sell','hold_noted','watchlist_add','watchlist_remove')),
-            shares          REAL,
-            price_per_share REAL,
-            total_value     REAL    GENERATED ALWAYS AS (shares * price_per_share) VIRTUAL,
-            was_system_suggested INTEGER DEFAULT 0,  -- 1 if following a recommendation
-            rec_id          INTEGER REFERENCES recommendations(id),
-            my_reasoning    TEXT,   -- user's own note about why
-            outcome_notes   TEXT,   -- user can add notes later about how it went
-            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            action_date      DATE    NOT NULL DEFAULT (date('now')),
+            ticker           TEXT    NOT NULL,
+            action           TEXT    NOT NULL CHECK(action IN ('buy','sell','hold_noted','watchlist_add','watchlist_remove')),
+            shares           REAL,
+            price_per_share  REAL,
+            total_value      REAL    GENERATED ALWAYS AS (shares * price_per_share) VIRTUAL,
+            was_system_suggested INTEGER DEFAULT 0,
+            rec_id           INTEGER REFERENCES recommendations(id),
+            my_reasoning     TEXT,
+            outcome_notes    TEXT,
+            created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
-        -- ── WATCHLIST ─────────────────────────────────────────────────────────
+        -- ── WATCHLIST (individual stocks) ─────────────────────────────────────
         CREATE TABLE IF NOT EXISTS watchlist (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             ticker          TEXT    NOT NULL UNIQUE,
@@ -104,77 +123,117 @@ def init_db():
             is_active       INTEGER DEFAULT 1
         );
 
-        -- ── ANALYSIS RUNS ─────────────────────────────────────────────────────
-        CREATE TABLE IF NOT EXISTS analysis_runs (
+        -- ── SECTOR WATCHLIST ──────────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS sector_watchlist (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            run_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            trigger         TEXT    DEFAULT 'manual',  -- 'market_open', 'market_close', 'manual'
-            market_summary  TEXT,   -- JSON: overall market sentiment
-            macro_summary   TEXT,   -- JSON: macro indicators snapshot
-            geo_summary     TEXT,   -- JSON: geopolitical risk signals
-            sentiment_summary TEXT, -- JSON: news/reddit sentiment scores
-            status          TEXT    DEFAULT 'pending',  -- pending, running, completed, failed
-            error_message   TEXT,
-            duration_secs   REAL
+            sector_name     TEXT    NOT NULL UNIQUE,
+            why_watching    TEXT,
+            key_stocks      TEXT    DEFAULT '[]',   -- JSON array of tickers
+            key_events      TEXT    DEFAULT '[]',   -- JSON array of event strings
+            last_analyzed   TIMESTAMP,
+            is_active       INTEGER DEFAULT 1
         );
 
-        -- ── RECOMMENDATIONS (per-stock, per-run) ──────────────────────────────
-        CREATE TABLE IF NOT EXISTS recommendations (
+        -- ── BROKER ACCOUNTS ───────────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS broker_accounts (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            run_id          INTEGER NOT NULL REFERENCES analysis_runs(id),
-            ticker          TEXT    NOT NULL,
-            company_name    TEXT,
-            action          TEXT    NOT NULL CHECK(action IN ('strong_buy','buy','hold','sell','strong_sell','new_pick')),
-            confidence      INTEGER CHECK(confidence BETWEEN 1 AND 10),
-            current_price   REAL,
-            buy_range_low   REAL,
-            buy_range_high  REAL,
-            sell_target_low REAL,
-            sell_target_high REAL,
-            stop_loss       REAL,
-            suggested_shares REAL,  -- suggested position size
-            suggested_pct_portfolio REAL,  -- % of portfolio
-            growth_potential_pct REAL,     -- % upside
-            growth_timeline TEXT,           -- e.g. "12-18 months"
-            thesis          TEXT,           -- Claude's investment thesis
-            risks           TEXT,           -- JSON array of risk factors
-            catalysts       TEXT,           -- JSON array of upcoming catalysts
-            technical_score INTEGER,        -- 1-10
-            sentiment_score INTEGER,        -- 1-10
-            macro_score     INTEGER,        -- 1-10
-            is_new_pick     INTEGER DEFAULT 0,  -- 1 if not in current portfolio
-            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            broker_name     TEXT    NOT NULL,
+            account_type    TEXT    DEFAULT 'taxable',  -- taxable, ira, roth_ira, 401k
+            cash_balance    REAL    DEFAULT 0,
+            total_value     REAL    DEFAULT 0,
+            updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            notes           TEXT
+        );
+
+        -- ── ANALYSIS RUNS ─────────────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS analysis_runs (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            trigger          TEXT    DEFAULT 'manual',
+            market_summary   TEXT,
+            macro_summary    TEXT,
+            geo_summary      TEXT,
+            sentiment_summary TEXT,
+            status           TEXT    DEFAULT 'pending',
+            error_message    TEXT,
+            duration_secs    REAL
+        );
+
+        -- ── RECOMMENDATIONS ───────────────────────────────────────────────────
+        CREATE TABLE IF NOT EXISTS recommendations (
+            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id                  INTEGER NOT NULL REFERENCES analysis_runs(id),
+            ticker                  TEXT    NOT NULL,
+            company_name            TEXT,
+            action                  TEXT    NOT NULL CHECK(action IN ('strong_buy','buy','hold','sell','strong_sell','new_pick')),
+            confidence              INTEGER CHECK(confidence BETWEEN 1 AND 10),
+            current_price           REAL,
+            buy_range_low           REAL,
+            buy_range_high          REAL,
+            sell_target_low         REAL,
+            sell_target_high        REAL,
+            stop_loss               REAL,
+            suggested_shares        REAL,
+            suggested_pct_portfolio REAL,
+            growth_potential_pct    REAL,
+            growth_timeline         TEXT,
+            thesis                  TEXT,
+            risks                   TEXT,
+            catalysts               TEXT,
+            technical_score         INTEGER,
+            sentiment_score         INTEGER,
+            macro_score             INTEGER,
+            is_new_pick             INTEGER DEFAULT 0,
+            horizon                 TEXT    DEFAULT 'medium',  -- short / medium / long
+            play_type               TEXT    DEFAULT 'core',    -- core / momentum / seasonal
+            created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
         -- ── RECOMMENDATION FEEDBACK ───────────────────────────────────────────
         CREATE TABLE IF NOT EXISTS rec_feedback (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             rec_id          INTEGER NOT NULL REFERENCES recommendations(id),
-            was_accurate    INTEGER,  -- 1 yes, 0 no, NULL = not yet judged
+            was_accurate    INTEGER,
             user_comment    TEXT,
             judged_at       TIMESTAMP
         );
 
-        -- ── DEFAULT WATCHLIST (your core stocks) ──────────────────────────────
+        -- ── RESEARCH RESULTS (cached on-demand analysis) ──────────────────────
+        CREATE TABLE IF NOT EXISTS research_results (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            subject         TEXT    NOT NULL,
+            subject_type    TEXT    DEFAULT 'stock',  -- stock / sector
+            research_json   TEXT,
+            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- ── DEFAULT WATCHLIST ─────────────────────────────────────────────────
         INSERT OR IGNORE INTO watchlist (ticker, company_name, sector) VALUES
             ('NVDA',  'NVIDIA Corporation',          'AI Infrastructure'),
             ('AMD',   'Advanced Micro Devices',      'AI Infrastructure'),
             ('INTC',  'Intel Corporation',           'AI Infrastructure'),
             ('MU',    'Micron Technology',           'AI Infrastructure'),
             ('MRVL',  'Marvell Technology',          'AI Infrastructure'),
-            ('TSMC',  'Taiwan Semiconductor',        'AI Infrastructure'),
+            ('TSM',   'Taiwan Semiconductor',        'AI Infrastructure'),
             ('AVGO',  'Broadcom Inc.',               'AI Infrastructure'),
             ('IONQ',  'IonQ Inc.',                   'Quantum Computing'),
             ('RGTI',  'Rigetti Computing',           'Quantum Computing'),
             ('QUBT',  'Quantum Computing Inc.',      'Quantum Computing'),
             ('RKLB',  'Rocket Lab USA',              'Space'),
-            ('SPCE',  'Virgin Galactic',             'Space'),
             ('ASTS',  'AST SpaceMobile',             'Space'),
             ('NEE',   'NextEra Energy',              'Clean Energy'),
             ('FSLR',  'First Solar',                 'Clean Energy'),
             ('CEG',   'Constellation Energy',        'Nuclear Energy'),
             ('VST',   'Vistra Corp',                 'Energy');
+
+        -- ── DEFAULT SECTOR WATCHLIST ──────────────────────────────────────────
+        INSERT OR IGNORE INTO sector_watchlist (sector_name, why_watching, key_stocks) VALUES
+            ('AI Infrastructure', 'Core holding sector — data center buildout, GPU/chip demand', '["NVDA","AMD","AVGO","MU","MRVL","TSM"]'),
+            ('Quantum Computing',  'High-risk high-reward — early stage, watching for commercialization milestones', '["IONQ","RGTI","QUBT"]'),
+            ('Space',              'SpaceX IPO catalyst, satellite internet, defense contracts', '["RKLB","ASTS"]'),
+            ('Clean Energy',       'IRA tailwinds, nuclear renaissance, grid demand from AI data centers', '["CEG","VST","NEE","FSLR"]');
         """)
+    migrate_add_columns()
     print(f"✅ Database initialized at {DB_PATH}")
 
 
@@ -186,12 +245,12 @@ def upsert_holding(ticker, shares, avg_cost, company_name=None, sector=None, not
             INSERT INTO portfolio (ticker, company_name, shares, avg_cost_basis, sector, notes, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(ticker) DO UPDATE SET
-                shares        = excluded.shares,
+                shares         = excluded.shares,
                 avg_cost_basis = excluded.avg_cost_basis,
-                company_name  = COALESCE(excluded.company_name, company_name),
-                sector        = COALESCE(excluded.sector, sector),
-                notes         = COALESCE(excluded.notes, notes),
-                updated_at    = CURRENT_TIMESTAMP
+                company_name   = COALESCE(excluded.company_name, company_name),
+                sector         = COALESCE(excluded.sector, sector),
+                notes          = COALESCE(excluded.notes, notes),
+                updated_at     = CURRENT_TIMESTAMP
         """, (ticker.upper(), company_name, shares, avg_cost, sector, notes))
 
 
@@ -199,7 +258,7 @@ def get_portfolio():
     with get_connection() as conn:
         rows = conn.execute("""
             SELECT p.*,
-                   ROUND((p.current_price - p.avg_cost_basis) / p.avg_cost_basis * 100, 2) as pnl_pct,
+                   ROUND((p.current_price - p.avg_cost_basis) / NULLIF(p.avg_cost_basis, 0) * 100, 2) as pnl_pct,
                    ROUND((p.current_price - p.avg_cost_basis) * p.shares, 2) as pnl_dollars
             FROM portfolio p
             ORDER BY p.shares * COALESCE(p.current_price, p.avg_cost_basis) DESC
@@ -207,8 +266,31 @@ def get_portfolio():
         return [dict(r) for r in rows]
 
 
+def refresh_portfolio_prices():
+    """Pull latest prices from yfinance for all holdings. Called by UI refresh button."""
+    import yfinance as yf
+    holdings = get_portfolio()
+    if not holdings:
+        return 0
+    tickers = [h["ticker"] for h in holdings]
+    updated = 0
+    with get_connection() as conn:
+        for ticker in tickers:
+            try:
+                info = yf.Ticker(ticker).fast_info
+                price = getattr(info, "last_price", None) or getattr(info, "previous_close", None)
+                if price:
+                    conn.execute(
+                        "UPDATE portfolio SET current_price=?, updated_at=CURRENT_TIMESTAMP WHERE ticker=?",
+                        (float(price), ticker)
+                    )
+                    updated += 1
+            except Exception:
+                pass
+    return updated
+
+
 def snapshot_portfolio(source="manual"):
-    """Save a point-in-time snapshot of current holdings."""
     holdings = get_portfolio()
     today = datetime.now().date().isoformat()
     with get_connection() as conn:
@@ -218,6 +300,61 @@ def snapshot_portfolio(source="manual"):
                 INSERT INTO portfolio_history (snapshot_date, ticker, shares, avg_cost_basis, price_at_snapshot, total_value, source)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (today, h["ticker"], h["shares"], h["avg_cost_basis"], price, h["shares"] * price, source))
+
+
+# ── BROKER ACCOUNT OPERATIONS ────────────────────────────────────────────────
+
+def get_broker_accounts():
+    with get_connection() as conn:
+        rows = conn.execute("SELECT * FROM broker_accounts ORDER BY broker_name").fetchall()
+        return [dict(r) for r in rows]
+
+
+def upsert_broker_account(broker_name, account_type="taxable", cash_balance=0, total_value=0, notes=None, account_id=None):
+    with get_connection() as conn:
+        if account_id:
+            conn.execute("""
+                UPDATE broker_accounts SET broker_name=?, account_type=?, cash_balance=?, total_value=?,
+                notes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?
+            """, (broker_name, account_type, cash_balance, total_value, notes, account_id))
+        else:
+            conn.execute("""
+                INSERT INTO broker_accounts (broker_name, account_type, cash_balance, total_value, notes)
+                VALUES (?, ?, ?, ?, ?)
+            """, (broker_name, account_type, cash_balance, total_value, notes))
+
+
+def delete_broker_account(account_id):
+    with get_connection() as conn:
+        conn.execute("DELETE FROM broker_accounts WHERE id=?", (account_id,))
+
+
+# ── SECTOR WATCHLIST OPERATIONS ─────────────────────────────────────────────
+
+def get_sector_watchlist():
+    with get_connection() as conn:
+        rows = conn.execute("SELECT * FROM sector_watchlist WHERE is_active=1 ORDER BY sector_name").fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["key_stocks"] = json.loads(d["key_stocks"] or "[]")
+            d["key_events"] = json.loads(d["key_events"] or "[]")
+            result.append(d)
+        return result
+
+
+def upsert_sector(sector_name, why_watching=None, key_stocks=None, key_events=None):
+    stocks_json = json.dumps(key_stocks or [])
+    events_json = json.dumps(key_events or [])
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT INTO sector_watchlist (sector_name, why_watching, key_stocks, key_events)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(sector_name) DO UPDATE SET
+                why_watching = COALESCE(excluded.why_watching, why_watching),
+                key_stocks   = excluded.key_stocks,
+                key_events   = excluded.key_events
+        """, (sector_name, why_watching, stocks_json, events_json))
 
 
 # ── ACTION LOG OPERATIONS ───────────────────────────────────────────────────
@@ -230,7 +367,6 @@ def log_action(ticker, action, shares, price, was_suggested=False, rec_id=None, 
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (ticker, action, shares, price, int(was_suggested), rec_id, reasoning))
 
-        # Keep portfolio in sync
         if action == "buy":
             row = conn.execute("SELECT shares, avg_cost_basis FROM portfolio WHERE ticker=?", (ticker,)).fetchone()
             if row:
@@ -239,8 +375,7 @@ def log_action(ticker, action, shares, price, was_suggested=False, rec_id=None, 
                 new_shares = old_shares + shares
                 new_cost   = ((old_shares * old_cost) + (shares * price)) / new_shares
                 conn.execute("""
-                    UPDATE portfolio SET shares=?, avg_cost_basis=?, updated_at=CURRENT_TIMESTAMP
-                    WHERE ticker=?
+                    UPDATE portfolio SET shares=?, avg_cost_basis=?, updated_at=CURRENT_TIMESTAMP WHERE ticker=?
                 """, (new_shares, new_cost, ticker))
             else:
                 conn.execute("""
@@ -283,7 +418,8 @@ def save_recommendations(run_id, recs: list[dict]):
                     suggested_shares, suggested_pct_portfolio,
                     growth_potential_pct, growth_timeline,
                     thesis, risks, catalysts,
-                    technical_score, sentiment_score, macro_score, is_new_pick
+                    technical_score, sentiment_score, macro_score,
+                    is_new_pick, horizon, play_type
                 ) VALUES (
                     :run_id, :ticker, :company_name, :action, :confidence,
                     :current_price, :buy_range_low, :buy_range_high,
@@ -291,26 +427,95 @@ def save_recommendations(run_id, recs: list[dict]):
                     :suggested_shares, :suggested_pct_portfolio,
                     :growth_potential_pct, :growth_timeline,
                     :thesis, :risks, :catalysts,
-                    :technical_score, :sentiment_score, :macro_score, :is_new_pick
+                    :technical_score, :sentiment_score, :macro_score,
+                    :is_new_pick, :horizon, :play_type
                 )
-            """, {**r, "run_id": run_id})
+            """, {
+                **r,
+                "run_id":    run_id,
+                "horizon":   r.get("horizon", "medium"),
+                "play_type": r.get("play_type", "core"),
+            })
 
 
 def get_latest_recommendations():
+    """Return the most recent recommendation per ticker across all completed runs."""
     with get_connection() as conn:
-        run = conn.execute("""
-            SELECT id FROM analysis_runs WHERE status='completed' ORDER BY run_at DESC LIMIT 1
-        """).fetchone()
-        if not run:
-            return []
         rows = conn.execute("""
             SELECT r.*, ar.run_at, ar.market_summary
             FROM recommendations r
             JOIN analysis_runs ar ON r.run_id = ar.id
-            WHERE r.run_id = ?
+            WHERE ar.status = 'completed'
+              AND r.id IN (
+                  SELECT MAX(r2.id)
+                  FROM recommendations r2
+                  JOIN analysis_runs ar2 ON r2.run_id = ar2.id
+                  WHERE ar2.status = 'completed'
+                  GROUP BY r2.ticker
+              )
             ORDER BY r.confidence DESC, r.action
-        """, (run["id"],)).fetchall()
+        """).fetchall()
         return [dict(r) for r in rows]
+
+
+def get_sector_top_picks(n=3):
+    """Return top-N picks per sector using the most recent recommendation per ticker."""
+    with get_connection() as conn:
+        rows = conn.execute("""
+            SELECT r.ticker, r.company_name, r.action, r.confidence,
+                   r.current_price, r.growth_potential_pct, r.horizon, r.play_type,
+                   COALESCE(p.sector, w.sector, 'Other') as sector
+            FROM recommendations r
+            LEFT JOIN portfolio p ON r.ticker = p.ticker
+            LEFT JOIN watchlist w ON r.ticker = w.ticker
+            WHERE r.action IN ('strong_buy', 'buy', 'new_pick')
+              AND r.id IN (
+                  SELECT MAX(r2.id)
+                  FROM recommendations r2
+                  JOIN analysis_runs ar2 ON r2.run_id = ar2.id
+                  WHERE ar2.status = 'completed'
+                  GROUP BY r2.ticker
+              )
+            ORDER BY r.confidence DESC, r.growth_potential_pct DESC
+        """).fetchall()
+
+        by_sector = {}
+        for row in rows:
+            d = dict(row)
+            sector = d["sector"] or "Other"
+            if sector not in by_sector:
+                by_sector[sector] = []
+            if len(by_sector[sector]) < n:
+                by_sector[sector].append(d)
+        return by_sector
+
+
+# ── RESEARCH RESULTS ─────────────────────────────────────────────────────────
+
+def get_research_result(subject: str, max_age_hours: int = 6):
+    """Return cached research if it exists and is fresh enough."""
+    with get_connection() as conn:
+        row = conn.execute("""
+            SELECT * FROM research_results
+            WHERE LOWER(subject) = LOWER(?)
+            ORDER BY created_at DESC LIMIT 1
+        """, (subject,)).fetchone()
+        if not row:
+            return None
+        age_hours = (datetime.now() - datetime.fromisoformat(str(row["created_at"]))).total_seconds() / 3600
+        if age_hours > max_age_hours:
+            return None
+        d = dict(row)
+        d["research"] = json.loads(d["research_json"] or "{}")
+        return d
+
+
+def save_research_result(subject: str, subject_type: str, research: dict):
+    with get_connection() as conn:
+        conn.execute("""
+            INSERT INTO research_results (subject, subject_type, research_json)
+            VALUES (?, ?, ?)
+        """, (subject.upper(), subject_type, json.dumps(research)))
 
 
 # ── USER PROFILE ─────────────────────────────────────────────────────────────
@@ -329,6 +534,8 @@ def update_user_profile(**kwargs):
     with get_connection() as conn:
         conn.execute(f"UPDATE user_profile SET {fields}, updated_at=CURRENT_TIMESTAMP WHERE id=1", values)
 
+
+# ── WATCHLIST ─────────────────────────────────────────────────────────────────
 
 def get_watchlist():
     with get_connection() as conn:

@@ -1,51 +1,56 @@
 """
-app.py — AI Trading Recommendation App (Streamlit)
+app.py — AI Trader (Streamlit)
+
+4 tabs:
+  1. Portfolio     — sector buckets, broker accounts, refresh prices
+  2. Look Out      — individual watchlist + sector-level tracking
+  3. Research      — on-demand stock / sector deep-dive
+  4. Recommendations — sector spotlight, horizon tabs, AI picks
 
 Run:  streamlit run app.py
 """
 
 import streamlit as st
 import json
-from datetime import datetime, date
+import time
+from datetime import datetime
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv()
 
-# ── PAGE CONFIG (must be first Streamlit call) ────────────────────────────────
+# ── PAGE CONFIG ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="AI Trader",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="collapsed",
-    menu_items={"About": "AI-powered trading recommendations — personal use only."}
+    menu_items={"About": "AI-powered trading — personal use only."}
 )
 
-# ── IMPORTS (after page config) ───────────────────────────────────────────────
 import sys
-from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from core.database import (
     init_db, get_portfolio, get_latest_recommendations, get_action_log,
     log_action, upsert_holding, get_user_profile, update_user_profile,
-    get_watchlist, snapshot_portfolio
+    get_watchlist, snapshot_portfolio, get_broker_accounts, upsert_broker_account,
+    delete_broker_account, get_sector_watchlist, upsert_sector,
+    get_sector_top_picks, get_research_result, save_research_result,
+    refresh_portfolio_prices,
 )
 from core.portfolio_parser import parse_file
 
-# ── INITIALIZE DB ─────────────────────────────────────────────────────────────
 init_db()
 
-# ── MOBILE-FRIENDLY CUSTOM CSS ────────────────────────────────────────────────
+# ── CSS ────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-/* Mobile responsiveness */
 @media (max-width: 768px) {
     .block-container { padding: 1rem 0.75rem !important; }
     .stColumn { padding: 0.25rem !important; }
 }
-
-/* Card styles */
 .rec-card {
-    border-radius: 12px;
-    padding: 14px 16px;
-    margin-bottom: 10px;
+    border-radius: 12px; padding: 14px 16px; margin-bottom: 10px;
     border-left: 5px solid #ccc;
 }
 .rec-card.strong-buy  { background: #f0fdf4; border-color: #16a34a; }
@@ -66,6 +71,20 @@ st.markdown("""
 .badge-strong-sell { background: #e11d48; color: white; }
 .badge-new-pick    { background: #2563eb; color: white; }
 
+.horizon-badge {
+    font-size: 11px; font-weight: 600; padding: 2px 8px;
+    border-radius: 12px; display: inline-block; margin-left: 6px;
+}
+.horizon-short  { background: #fef3c7; color: #92400e; }
+.horizon-medium { background: #dbeafe; color: #1e40af; }
+.horizon-long   { background: #f3e8ff; color: #6b21a8; }
+
+.play-badge {
+    font-size: 11px; font-weight: 600; padding: 2px 8px;
+    border-radius: 12px; display: inline-block; margin-left: 4px;
+    background: #f1f5f9; color: #475569;
+}
+
 .metric-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
 .metric-chip {
     background: #f1f5f9; border-radius: 8px;
@@ -73,21 +92,25 @@ st.markdown("""
 }
 .pnl-pos { color: #16a34a; font-weight: 700; }
 .pnl-neg { color: #dc2626; font-weight: 700; }
-
-/* Section headers */
 .section-header {
     font-size: 18px; font-weight: 700; margin: 16px 0 8px;
     padding-bottom: 6px; border-bottom: 2px solid #e2e8f0;
 }
-
-/* Score bars */
-.score-bar-bg { background: #e2e8f0; border-radius: 4px; height: 6px; margin: 2px 0 6px; }
+.score-bar-bg  { background: #e2e8f0; border-radius: 4px; height: 6px; margin: 2px 0 6px; }
 .score-bar-fill { border-radius: 4px; height: 6px; }
+
+.sector-card {
+    background: #f8fafc; border-radius: 10px; padding: 12px 14px;
+    margin-bottom: 8px; border: 1px solid #e2e8f0;
+}
+.macro-badge-green  { background: #dcfce7; color: #166534; border-radius: 8px; padding: 2px 8px; font-size: 12px; }
+.macro-badge-yellow { background: #fef9c3; color: #713f12; border-radius: 8px; padding: 2px 8px; font-size: 12px; }
+.macro-badge-red    { background: #fee2e2; color: #991b1b; border-radius: 8px; padding: 2px 8px; font-size: 12px; }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ── HELPER FUNCTIONS ──────────────────────────────────────────────────────────
+# ── HELPERS ────────────────────────────────────────────────────────────────────
 
 ACTION_LABELS = {
     "strong_buy":  ("⬆️⬆️ STRONG BUY",  "badge-strong-buy",  "strong-buy"),
@@ -98,463 +121,760 @@ ACTION_LABELS = {
     "new_pick":    ("✨ NEW PICK",        "badge-new-pick",    "new-pick"),
 }
 
+HORIZON_LABELS = {
+    "short":  ("Short-term", "horizon-short"),
+    "medium": ("Medium",     "horizon-medium"),
+    "long":   ("Long-term",  "horizon-long"),
+}
+
+SECTOR_BUCKETS = [
+    "AI Infrastructure", "Quantum Computing", "Space",
+    "Clean Energy", "Nuclear Energy", "Semiconductors",
+    "Software", "Crypto", "Other",
+]
+
 def fmt_price(v):
     return f"${v:,.2f}" if v is not None else "—"
 
 def fmt_pct(v):
     if v is None: return "—"
     sign = "+" if v >= 0 else ""
-    cls = "pnl-pos" if v >= 0 else "pnl-neg"
+    cls  = "pnl-pos" if v >= 0 else "pnl-neg"
     return f'<span class="{cls}">{sign}{v:.1f}%</span>'
 
 def score_bar(score, color="#3b82f6"):
-    if score is None:
-        return ""
-    pct = min(100, max(0, score * 10))
-    return f"""
-    <div class="score-bar-bg">
-      <div class="score-bar-fill" style="width:{pct}%;background:{color};"></div>
-    </div>"""
+    if score is None: return ""
+    pct = min(100, max(0, (score or 0) * 10))
+    return (f'<div class="score-bar-bg">'
+            f'<div class="score-bar-fill" style="width:{pct}%;background:{color};"></div>'
+            f'</div>')
 
 def confidence_color(c):
     if c is None: return "#94a3b8"
-    if c >= 8: return "#16a34a"
-    if c >= 6: return "#ca8a04"
+    if c >= 8:  return "#16a34a"
+    if c >= 6:  return "#ca8a04"
     return "#dc2626"
 
+def macro_badge(score):
+    if score is None: return ""
+    if score >= 7:   return f'<span class="macro-badge-green">Macro ▲</span>'
+    if score >= 4:   return f'<span class="macro-badge-yellow">Macro ~</span>'
+    return f'<span class="macro-badge-red">Macro ▼</span>'
 
-# ── TOP NAVIGATION ────────────────────────────────────────────────────────────
+def render_rec_card(r):
+    """Render a single recommendation card (shared by Recommendations tab)."""
+    action    = r.get("action", "hold")
+    label, badge_cls, card_cls = ACTION_LABELS.get(action, ("HOLD", "badge-hold", "hold"))
+    conf      = r.get("confidence")
+    horizon   = r.get("horizon", "medium")
+    play_type = r.get("play_type", "core")
+    h_label, h_cls = HORIZON_LABELS.get(horizon, ("Medium", "horizon-medium"))
+    thesis_raw = r.get("thesis", "")
+    # Cap thesis at 3 sentences
+    sentences = [s.strip() for s in thesis_raw.replace("\n", " ").split(".") if s.strip()]
+    thesis    = ". ".join(sentences[:3]) + ("." if sentences else "")
 
-tabs = st.tabs(["📊 Recommendations", "💼 Portfolio", "📓 Trade Journal", "👁 Watchlist", "⚙️ Profile"])
+    st.markdown(f"""
+    <div class="rec-card {card_cls}">
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:6px;">
+        <div>
+          <strong style="font-size:16px;">{r.get('ticker','')}</strong>
+          <span style="color:#64748b; margin-left:6px; font-size:13px;">{r.get('company_name','')}</span>
+        </div>
+        <div>
+          <span class="action-badge {badge_cls}">{label}</span>
+          <span class="horizon-badge {h_cls}">{h_label}</span>
+          <span class="play-badge">{play_type}</span>
+        </div>
+      </div>
+      <div class="metric-row" style="margin-top:8px;">
+        <span class="metric-chip">Price {fmt_price(r.get('current_price'))}</span>
+        <span class="metric-chip">Confidence <strong style="color:{confidence_color(conf)};">{conf}/10</strong></span>
+        <span class="metric-chip">Buy {fmt_price(r.get('buy_range_low'))}–{fmt_price(r.get('buy_range_high'))}</span>
+        <span class="metric-chip">Sell {fmt_price(r.get('sell_target_low'))}–{fmt_price(r.get('sell_target_high'))}</span>
+        {f'<span class="metric-chip">Stop {fmt_price(r.get("stop_loss"))}</span>' if r.get("stop_loss") else ""}
+        <span class="metric-chip">⏱ {r.get('growth_timeline','—')}</span>
+        {f'<span class="metric-chip">+{r.get("growth_potential_pct"):.0f}% upside</span>' if r.get("growth_potential_pct") else ""}
+      </div>
+      <p style="margin:8px 0 0; font-size:13px; color:#475569; line-height:1.5;">{thesis}</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — RECOMMENDATIONS
-# ═══════════════════════════════════════════════════════════════════════════════
-with tabs[0]:
-    st.markdown('<div class="section-header">Latest Recommendations</div>', unsafe_allow_html=True)
+    with st.expander("Scores · Risks · Catalysts"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.caption("Technical")
+            st.markdown(score_bar(r.get("technical_score"), "#3b82f6"), unsafe_allow_html=True)
+            st.caption(f"{r.get('technical_score','?')}/10")
+        with c2:
+            st.caption("Sentiment")
+            st.markdown(score_bar(r.get("sentiment_score"), "#8b5cf6"), unsafe_allow_html=True)
+            st.caption(f"{r.get('sentiment_score','?')}/10")
+        with c3:
+            st.caption("Macro")
+            st.markdown(score_bar(r.get("macro_score"), "#f59e0b"), unsafe_allow_html=True)
+            st.caption(f"{r.get('macro_score','?')}/10")
 
-    recs = get_latest_recommendations()
+        risks = r.get("risks", "[]")
+        if isinstance(risks, str):
+            try: risks = json.loads(risks)
+            except: risks = []
+        catalysts = r.get("catalysts", "[]")
+        if isinstance(catalysts, str):
+            try: catalysts = json.loads(catalysts)
+            except: catalysts = []
 
-    if not recs:
-        st.info("No recommendations yet. Run the analysis pipeline or wait for the scheduled job (9:30 AM / 4:00 PM ET).")
-        st.caption("💡 To manually trigger: run `python core/analyzer.py` from your project folder.")
-    else:
-        # Show run metadata
-        run_at = recs[0].get("run_at", "")
-        run_at_str = str(run_at)[:16] if run_at else "—"
-        market = recs[0].get("market_summary")
-        if market:
-            try:
-                ms = json.loads(market)
-                sentiment = ms.get("overall_sentiment", "")
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Market Sentiment", sentiment)
-                col2.metric("Analysis Time", run_at_str)
-                col3.metric("Stocks Analyzed", len(recs))
-            except Exception:
-                st.caption(f"Analysis run: {run_at_str}")
+        if risks:
+            st.markdown("**Risks:** " + " · ".join(f"⚠️ {x}" for x in risks[:3]))
+        if catalysts:
+            st.markdown("**Catalysts:** " + " · ".join(f"🚀 {x}" for x in catalysts[:3]))
 
-        st.markdown("---")
-
-        # Filter controls
-        fcol1, fcol2 = st.columns([2, 1])
-        with fcol1:
-            filter_action = st.multiselect(
-                "Filter by action",
-                ["strong_buy", "buy", "hold", "sell", "strong_sell", "new_pick"],
-                default=["strong_buy", "buy", "new_pick"],
-                format_func=lambda x: ACTION_LABELS.get(x, (x,))[0]
-            )
-        with fcol2:
-            min_confidence = st.slider("Min confidence", 1, 10, 6)
-
-        filtered = [r for r in recs
-                   if (not filter_action or r["action"] in filter_action)
-                   and (r.get("confidence") or 0) >= min_confidence]
-
-        if not filtered:
-            st.warning("No recommendations match your filters.")
-
-        for rec in filtered:
-            action = rec.get("action", "hold")
-            label, badge_cls, card_cls = ACTION_LABELS.get(action, ("—", "", "hold"))
-            conf = rec.get("confidence")
-            conf_color = confidence_color(conf)
-            ticker = rec.get("ticker", "")
-            company = rec.get("company_name") or ticker
-            is_new = rec.get("is_new_pick", 0)
-
-            st.markdown(f"""
-            <div class="rec-card {card_cls}">
-              <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:6px;">
-                <div>
-                  <span style="font-size:20px;font-weight:800;">{ticker}</span>
-                  <span style="color:#64748b;margin-left:8px;font-size:13px;">{company}</span>
-                  {' <span style="font-size:11px;background:#dbeafe;color:#1d4ed8;padding:2px 7px;border-radius:10px;margin-left:4px;">NEW</span>' if is_new else ''}
-                </div>
-                <div style="display:flex;gap:8px;align-items:center;">
-                  <span class="action-badge {badge_cls}">{label}</span>
-                  <span style="font-size:12px;color:{conf_color};font-weight:700;">Conf: {conf}/10</span>
-                </div>
-              </div>
-
-              <div class="metric-row">
-                <span class="metric-chip">💵 Current: {fmt_price(rec.get('current_price'))}</span>
-                <span class="metric-chip">🎯 Buy: {fmt_price(rec.get('buy_range_low'))} – {fmt_price(rec.get('buy_range_high'))}</span>
-                <span class="metric-chip">📤 Sell: {fmt_price(rec.get('sell_target_low'))} – {fmt_price(rec.get('sell_target_high'))}</span>
-                <span class="metric-chip">🛑 Stop: {fmt_price(rec.get('stop_loss'))}</span>
-                <span class="metric-chip">📈 Upside: {fmt_pct(rec.get('growth_potential_pct'))}</span>
-                <span class="metric-chip">⏱ {rec.get('growth_timeline') or '—'}</span>
-              </div>
-
-              <div style="margin-top:10px;font-size:13px;color:#1e293b;line-height:1.5;">
-                <strong>Thesis:</strong> {rec.get('thesis') or '—'}
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-            # Expandable details
-            with st.expander(f"📐 Technical • Sentiment • Macro scores — {ticker}"):
-                sc1, sc2, sc3 = st.columns(3)
-                with sc1:
-                    st.caption("Technical")
-                    st.markdown(score_bar(rec.get("technical_score"), "#3b82f6"), unsafe_allow_html=True)
-                    st.caption(f"{rec.get('technical_score') or '—'}/10")
-                with sc2:
-                    st.caption("Sentiment")
-                    st.markdown(score_bar(rec.get("sentiment_score"), "#8b5cf6"), unsafe_allow_html=True)
-                    st.caption(f"{rec.get('sentiment_score') or '—'}/10")
-                with sc3:
-                    st.caption("Macro")
-                    st.markdown(score_bar(rec.get("macro_score"), "#f59e0b"), unsafe_allow_html=True)
-                    st.caption(f"{rec.get('macro_score') or '—'}/10")
-
-                risks = rec.get("risks")
-                catalysts = rec.get("catalysts")
-                if risks:
-                    try: risks = json.loads(risks)
-                    except: pass
-                    if isinstance(risks, list):
-                        st.markdown("**⚠️ Risks:** " + " • ".join(risks))
-                if catalysts:
-                    try: catalysts = json.loads(catalysts)
-                    except: pass
-                    if isinstance(catalysts, list):
-                        st.markdown("**🚀 Catalysts:** " + " • ".join(catalysts))
-
-                suggested_pct = rec.get("suggested_pct_portfolio")
-                suggested_shares = rec.get("suggested_shares")
-                if suggested_pct or suggested_shares:
-                    st.markdown(f"**💡 Suggested position:** {suggested_pct or '—'}% of portfolio"
-                               + (f" ({suggested_shares:.0f} shares)" if suggested_shares else ""))
-
-                # Quick action button
-                if action in ["strong_buy", "buy", "new_pick"]:
-                    if st.button(f"📓 Log a trade for {ticker}", key=f"log_{ticker}_{rec['id']}"):
-                        st.session_state["journal_prefill"] = {
-                            "ticker": ticker,
-                            "action": "buy",
-                            "rec_id": rec["id"],
-                            "was_suggested": True,
-                        }
-                        st.info("Switch to the 📓 Trade Journal tab to log this trade.")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — PORTFOLIO
-# ═══════════════════════════════════════════════════════════════════════════════
-with tabs[1]:
-    st.markdown('<div class="section-header">My Portfolio</div>', unsafe_allow_html=True)
-
-    # ── PDF / CSV Upload ───────────────────────────────────────────────────────
-    with st.expander("📄 Import from Brokerage Statement (PDF or CSV)", expanded=False):
-        uploaded = st.file_uploader(
-            "Upload Robinhood PDF, CSV, or any brokerage statement",
-            type=["pdf", "csv", "tsv"],
-            help="Your file is processed locally and never sent anywhere except the Claude API for parsing."
-        )
-        if uploaded:
-            with st.spinner("Parsing your statement..."):
-                try:
-                    holdings = parse_file(uploaded.name, uploaded.read())
-                    if holdings:
-                        st.success(f"Found {len(holdings)} holdings!")
-                        st.dataframe(holdings, use_container_width=True)
-                        if st.button("✅ Import these holdings into portfolio"):
-                            for h in holdings:
-                                upsert_holding(
-                                    ticker=h["ticker"],
-                                    shares=h["shares"],
-                                    avg_cost=h.get("avg_cost") or 0,
-                                    company_name=h.get("company_name"),
-                                )
-                            snapshot_portfolio(source="pdf_import")
-                            st.success("Holdings imported and snapshot saved!")
-                            st.rerun()
-                    else:
-                        st.warning("Could not extract holdings. Try a CSV export instead, or add holdings manually below.")
-                except Exception as e:
-                    st.error(f"Parse error: {e}")
-
-    # ── Manual Add ────────────────────────────────────────────────────────────
-    with st.expander("➕ Add / Update Holding Manually"):
-        m1, m2, m3 = st.columns(3)
-        with m1:
-            m_ticker = st.text_input("Ticker", placeholder="NVDA").upper()
-        with m2:
-            m_shares = st.number_input("Shares", min_value=0.0, step=0.01, format="%.4f")
-        with m3:
-            m_cost = st.number_input("Avg cost per share ($)", min_value=0.0, step=0.01, format="%.2f")
-        m_name = st.text_input("Company name (optional)", placeholder="NVIDIA Corporation")
-        if st.button("Save Holding") and m_ticker and m_shares > 0:
-            upsert_holding(m_ticker, m_shares, m_cost, m_name or None)
-            st.success(f"Saved {m_ticker}!")
+        if st.button("✅ I followed this", key=f"follow_{r.get('id',r.get('ticker'))}"):
+            st.session_state["journal_prefill"] = r
             st.rerun()
 
-    # ── Holdings Table ────────────────────────────────────────────────────────
-    holdings = get_portfolio()
-    if not holdings:
-        st.info("No holdings yet. Import a statement or add manually above.")
-    else:
-        total_cost  = sum((h.get("avg_cost_basis") or 0) * (h.get("shares") or 0) for h in holdings)
-        total_value = sum((h.get("current_price") or h.get("avg_cost_basis") or 0) * (h.get("shares") or 0) for h in holdings)
-        total_pnl   = total_value - total_cost
 
-        kc1, kc2, kc3 = st.columns(3)
-        kc1.metric("Total Cost Basis", f"${total_cost:,.0f}")
-        kc2.metric("Est. Current Value", f"${total_value:,.0f}")
-        kc3.metric("Unrealized P&L", f"${total_pnl:+,.0f}", delta=f"{(total_pnl/total_cost*100 if total_cost else 0):+.1f}%")
+# ── TABS ───────────────────────────────────────────────────────────────────────
+tab_portfolio, tab_lookout, tab_research, tab_recs = st.tabs([
+    "💼 Portfolio", "👁 Look Out", "🔍 Research", "📊 Recommendations"
+])
 
-        st.markdown("---")
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — PORTFOLIO
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_portfolio:
+    st.subheader("Current Portfolio")
+
+    # ── Top-level metrics ─────────────────────────────────────────────────────
+    holdings  = get_portfolio()
+    accounts  = get_broker_accounts()
+    total_cost  = sum((h.get("avg_cost_basis") or 0) * (h.get("shares") or 0) for h in holdings)
+    total_val   = sum((h.get("current_price") or h.get("avg_cost_basis") or 0) * (h.get("shares") or 0) for h in holdings)
+    total_pnl   = total_val - total_cost
+    total_cash  = sum(a.get("cash_balance") or 0 for a in accounts)
+    today_delta = 0  # would need yesterday's snapshot; shown as placeholder
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Portfolio Value",   f"${total_val:,.0f}")
+    col2.metric("Total Cost Basis",  f"${total_cost:,.0f}")
+    col3.metric("Unrealized P&L",    f"${total_pnl:+,.0f}", delta=f"{(total_pnl/total_cost*100) if total_cost else 0:+.1f}%")
+    col4.metric("Cash (all brokers)", f"${total_cash:,.0f}")
+    col5.metric("Total Capital",     f"${total_val + total_cash:,.0f}")
+
+    # ── Refresh button ────────────────────────────────────────────────────────
+    col_r1, col_r2 = st.columns([1, 4])
+    with col_r1:
+        if st.button("🔄 Refresh Prices", use_container_width=True):
+            with st.spinner("Fetching latest prices…"):
+                updated = refresh_portfolio_prices()
+            st.success(f"Updated {updated} tickers")
+            st.rerun()
+
+    st.divider()
+
+    # ── Sector buckets ────────────────────────────────────────────────────────
+    if holdings:
+        # Group by sector
+        by_sector: dict[str, list] = {}
         for h in holdings:
-            price     = h.get("current_price") or h.get("avg_cost_basis") or 0
-            cost      = h.get("avg_cost_basis") or 0
-            shares    = h.get("shares") or 0
-            value     = price * shares
-            pnl_pct   = h.get("pnl_pct")
-            pnl_dol   = h.get("pnl_dollars")
+            sector = h.get("sector") or "Other"
+            # Normalize to known bucket or "Other"
+            bucket = sector if sector in SECTOR_BUCKETS else "Other"
+            by_sector.setdefault(bucket, []).append(h)
 
-            pnl_sign  = "+" if (pnl_pct or 0) >= 0 else ""
-            pnl_color = "#16a34a" if (pnl_pct or 0) >= 0 else "#dc2626"
+        for bucket in SECTOR_BUCKETS:
+            items = by_sector.get(bucket, [])
+            if not items:
+                continue
+            b_cost = sum((h.get("avg_cost_basis") or 0) * (h.get("shares") or 0) for h in items)
+            b_val  = sum((h.get("current_price") or h.get("avg_cost_basis") or 0) * (h.get("shares") or 0) for h in items)
+            b_pnl  = b_val - b_cost
+            b_pct  = (b_pnl / b_cost * 100) if b_cost else 0
 
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.markdown(f"""
-                <div style="padding:10px 0;border-bottom:1px solid #e2e8f0;">
-                  <span style="font-size:17px;font-weight:700;">{h['ticker']}</span>
-                  <span style="color:#64748b;font-size:12px;margin-left:8px;">{h.get('company_name') or ''}</span>
-                  <div class="metric-row" style="margin-top:5px;">
-                    <span class="metric-chip">{shares:.4f} shares</span>
-                    <span class="metric-chip">Avg cost: {fmt_price(cost)}</span>
-                    <span class="metric-chip">Price: {fmt_price(price)}</span>
-                    <span class="metric-chip">Value: {fmt_price(value)}</span>
-                    <span class="metric-chip" style="color:{pnl_color};font-weight:700;">
-                      P&L: {pnl_sign}{fmt_price(pnl_dol)} ({pnl_sign}{pnl_pct or 0:.1f}%)
-                    </span>
-                  </div>
-                </div>
-                """, unsafe_allow_html=True)
+            with st.expander(f"**{bucket}** — {len(items)} stock{'s' if len(items) != 1 else ''}  |  ${b_val:,.0f} current  |  {b_pct:+.1f}%", expanded=True):
+                for h in items:
+                    cost  = h.get("avg_cost_basis") or 0
+                    price = h.get("current_price") or cost
+                    pnl_d = (price - cost) * (h.get("shares") or 0)
+                    pnl_p = (price - cost) / cost * 100 if cost else 0
+                    c1, c2, c3, c4, c5, c6 = st.columns([1.5, 2, 2, 2, 2, 2])
+                    c1.markdown(f"**{h['ticker']}**")
+                    c2.markdown(f"{h.get('shares',0):.2f} sh")
+                    c3.markdown(f"Avg {fmt_price(cost)}")
+                    c4.markdown(f"Now {fmt_price(price)}")
+                    c5.markdown(f"${pnl_d:+,.0f}", unsafe_allow_html=True)
+                    c6.markdown(fmt_pct(pnl_p), unsafe_allow_html=True)
+    else:
+        st.info("No holdings yet. Import a brokerage statement or add manually below.")
 
+    st.divider()
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — TRADE JOURNAL
-# ═══════════════════════════════════════════════════════════════════════════════
-with tabs[2]:
-    st.markdown('<div class="section-header">Trade Journal</div>', unsafe_allow_html=True)
-    st.caption("Log every trade you make — whether you followed a recommendation or made your own call. This keeps the system's portfolio accurate and improves future recommendations.")
-
-    # Pre-fill from recommendation click
-    prefill = st.session_state.pop("journal_prefill", {})
-
-    with st.form("trade_journal_form"):
-        st.subheader("Log a Trade")
-        j1, j2 = st.columns(2)
-        with j1:
-            j_ticker = st.text_input("Ticker *", value=prefill.get("ticker", "")).upper()
-            j_action = st.selectbox(
-                "Action *",
-                ["buy", "sell", "hold_noted", "watchlist_add"],
-                index=["buy", "sell", "hold_noted", "watchlist_add"].index(prefill.get("action", "buy"))
-            )
-            j_date = st.date_input("Date *", value=date.today())
-        with j2:
-            j_shares = st.number_input("Shares", min_value=0.0, step=0.01, format="%.4f")
-            j_price  = st.number_input("Price per share ($)", min_value=0.0, step=0.01, format="%.2f")
-
-        j_was_suggested = st.checkbox(
-            "I followed a system recommendation",
-            value=prefill.get("was_suggested", False)
-        )
-        j_reasoning = st.text_area(
-            "Your reasoning / notes",
-            placeholder="Why did you make this trade? Any context, conviction level, or things to remember later...",
-            height=80
-        )
-
-        submitted = st.form_submit_button("📝 Log Trade", use_container_width=True)
-        if submitted:
-            if not j_ticker:
-                st.error("Ticker is required.")
-            elif j_action in ["buy", "sell"] and (j_shares <= 0 or j_price <= 0):
-                st.error("Shares and price are required for buy/sell.")
+    # ── Import / Add holdings ─────────────────────────────────────────────────
+    with st.expander("📥 Import or Add Holdings"):
+        uploaded = st.file_uploader("Upload brokerage statement (PDF or CSV)", type=["pdf", "csv"])
+        if uploaded:
+            with st.spinner("Parsing statement…"):
+                parsed = parse_file(uploaded)
+            if parsed:
+                st.success(f"Found {len(parsed)} positions")
+                for pos in parsed:
+                    st.write(f"  {pos.get('ticker')} — {pos.get('shares')} shares @ ${pos.get('avg_cost',0):.2f}")
+                if st.button("✅ Import these holdings"):
+                    for pos in parsed:
+                        upsert_holding(pos["ticker"], pos["shares"], pos.get("avg_cost", 0),
+                                       company_name=pos.get("company_name"))
+                    snapshot_portfolio(source="pdf_import")
+                    st.success("Holdings imported.")
+                    st.rerun()
             else:
-                rec_id = prefill.get("rec_id") if j_was_suggested else None
-                log_action(
-                    ticker=j_ticker,
-                    action=j_action,
-                    shares=j_shares,
-                    price=j_price,
-                    was_suggested=j_was_suggested,
-                    rec_id=rec_id,
-                    reasoning=j_reasoning,
-                )
-                st.success(f"✅ Trade logged: {j_action.upper()} {j_shares} {j_ticker} @ ${j_price:.2f}")
+                st.warning("Could not parse any positions from this file.")
+
+        st.markdown("**Add manually:**")
+        with st.form("add_holding"):
+            col_a, col_b, col_c, col_d, col_e = st.columns([1, 1.5, 1.5, 1.5, 2])
+            ticker  = col_a.text_input("Ticker").upper()
+            shares  = col_b.number_input("Shares", min_value=0.0, step=0.01)
+            cost    = col_c.number_input("Avg Cost $", min_value=0.0, step=0.01)
+            sector  = col_d.selectbox("Sector", SECTOR_BUCKETS)
+            company = col_e.text_input("Company Name (optional)")
+            if st.form_submit_button("Add Holding") and ticker and shares > 0 and cost > 0:
+                upsert_holding(ticker, shares, cost, company_name=company or None, sector=sector)
+                st.success(f"Added {ticker}")
                 st.rerun()
 
-    st.markdown("---")
-    st.subheader("Trade History")
+    st.divider()
 
-    logs = get_action_log(limit=100)
-    if not logs:
-        st.info("No trades logged yet.")
+    # ── Broker Accounts ───────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">Broker Accounts & Cash</div>', unsafe_allow_html=True)
+
+    if accounts:
+        for acct in accounts:
+            col_a, col_b, col_c, col_d, col_e = st.columns([2, 1.5, 1.5, 1.5, 1])
+            col_a.markdown(f"**{acct['broker_name']}** — *{acct['account_type']}*")
+            col_b.markdown(f"Cash: {fmt_price(acct.get('cash_balance'))}")
+            col_c.markdown(f"Total: {fmt_price(acct.get('total_value'))}")
+            col_d.caption(f"Updated {str(acct.get('updated_at',''))[:10]}")
+            if col_e.button("🗑", key=f"del_acct_{acct['id']}"):
+                delete_broker_account(acct["id"])
+                st.rerun()
     else:
-        action_icons = {"buy": "⬆️", "sell": "⬇️", "hold_noted": "⏸", "watchlist_add": "👁"}
-        for entry in logs:
-            icon = action_icons.get(entry.get("action", ""), "•")
-            was_sug = "🤖 Rec" if entry.get("was_system_suggested") else "💡 Own call"
-            total = (entry.get("shares") or 0) * (entry.get("price_per_share") or 0)
-            st.markdown(f"""
-            <div style="padding:8px 12px;border-radius:8px;background:#f8fafc;margin-bottom:6px;border-left:3px solid #94a3b8;">
-              <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px;">
-                <span><strong>{icon} {entry.get('action','').upper()}</strong>
-                  <span style="font-size:16px;font-weight:800;margin-left:6px;">{entry.get('ticker')}</span>
-                  <span style="color:#64748b;font-size:12px;margin-left:6px;">{entry.get('shares','') or ''} shares @ {fmt_price(entry.get('price_per_share'))}</span>
-                </span>
-                <span style="font-size:12px;color:#64748b;">{entry.get('action_date','')} &nbsp;|&nbsp; {was_sug} &nbsp;|&nbsp; {fmt_price(total) if total else ''}</span>
-              </div>
-              {f'<div style="font-size:12px;color:#475569;margin-top:3px;">💬 {entry.get("my_reasoning")}</div>' if entry.get("my_reasoning") else ''}
-            </div>
-            """, unsafe_allow_html=True)
+        st.caption("No broker accounts added yet.")
+
+    with st.expander("➕ Add Broker Account"):
+        with st.form("add_broker"):
+            col_a, col_b, col_c, col_d = st.columns([2, 1.5, 1.5, 1.5])
+            broker_name  = col_a.text_input("Broker Name (e.g. Robinhood)")
+            account_type = col_b.selectbox("Account Type", ["taxable", "ira", "roth_ira", "401k", "savings"])
+            cash_balance = col_c.number_input("Cash Balance $", min_value=0.0, step=1.0)
+            total_value  = col_d.number_input("Total Account Value $", min_value=0.0, step=1.0)
+            if st.form_submit_button("Add Account") and broker_name:
+                upsert_broker_account(broker_name, account_type, cash_balance, total_value)
+                st.success(f"Added {broker_name}")
+                st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — WATCHLIST
+# TAB 2 — LOOK OUT STOCKS
 # ═══════════════════════════════════════════════════════════════════════════════
-with tabs[3]:
-    st.markdown('<div class="section-header">Watchlist</div>', unsafe_allow_html=True)
-    st.caption("All stocks being monitored in the analysis pipeline.")
+with tab_lookout:
+    st.subheader("Look Out Stocks")
+
+    recs_map = {r["ticker"]: r for r in get_latest_recommendations()}
+
+    # ── A. Individual Stock Watchlist ─────────────────────────────────────────
+    st.markdown('<div class="section-header">Individual Stocks</div>', unsafe_allow_html=True)
 
     watchlist = get_watchlist()
     if watchlist:
-        sectors = sorted(set(w.get("sector") or "Other" for w in watchlist))
-        for sector in sectors:
-            sector_stocks = [w for w in watchlist if (w.get("sector") or "Other") == sector]
+        by_sector_w: dict[str, list] = {}
+        for w in watchlist:
+            by_sector_w.setdefault(w.get("sector") or "Other", []).append(w)
+
+        for sector, items in sorted(by_sector_w.items()):
             st.markdown(f"**{sector}**")
-            cols = st.columns(min(4, len(sector_stocks)))
-            for i, stock in enumerate(sector_stocks):
-                with cols[i % len(cols)]:
-                    st.markdown(f"""
-                    <div style="background:#f1f5f9;border-radius:8px;padding:8px 10px;margin-bottom:6px;text-align:center;">
-                      <div style="font-weight:700;font-size:16px;">{stock['ticker']}</div>
-                      <div style="font-size:11px;color:#64748b;">{stock.get('company_name','')}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+            for w in items:
+                ticker  = w["ticker"]
+                rec     = recs_map.get(ticker)
+                col_a, col_b, col_c, col_d, col_e, col_f = st.columns([1.2, 2, 1.8, 2, 2.5, 1])
+                col_a.markdown(f"**{ticker}**")
+                col_b.markdown(w.get("company_name") or "")
+
+                if rec:
+                    action  = rec.get("action", "hold")
+                    label, badge_cls, _ = ACTION_LABELS.get(action, ("HOLD", "badge-hold", "hold"))
+                    ms = rec.get("macro_score") or 0
+                    run_at  = str(rec.get("run_at", ""))[:16]
+                    col_c.markdown(f'<span class="action-badge {badge_cls}" style="font-size:11px;">{label}</span>', unsafe_allow_html=True)
+                    col_d.markdown(f"Buy {fmt_price(rec.get('buy_range_low'))}–{fmt_price(rec.get('buy_range_high'))}")
+                    col_e.markdown(macro_badge(ms) + f" Sell {fmt_price(rec.get('sell_target_low'))}–{fmt_price(rec.get('sell_target_high'))}" + (f" <span style='color:#94a3b8;font-size:11px;'>({run_at})</span>" if run_at else ""), unsafe_allow_html=True)
+                else:
+                    col_c.caption("Not yet analyzed")
+                    col_d.markdown("")
+                    col_e.markdown("")
+
+                if col_f.button("↻", key=f"refresh_wl_{ticker}", help=f"Re-run analysis for {ticker}"):
+                    with st.spinner(f"Analyzing {ticker}…"):
+                        try:
+                            from core.collectors.market_data    import get_full_snapshot, get_market_overview
+                            from core.collectors.news_sentiment import get_full_sentiment, get_geopolitical_risk
+                            from core.collectors.macro_data     import get_macro_summary
+                            from core.agents.base               import call_agent
+                            from core.agents.pipeline           import run_pipeline
+                            from core.analyzer                  import save_run, write_results_json
+                            from core.database                  import get_user_profile, get_portfolio, get_watchlist
+
+                            snapshot  = get_full_snapshot(ticker)
+                            sentiment = get_full_sentiment(ticker, snapshot.get("company_name", ""))
+                            macro     = get_macro_summary()
+                            geo       = get_geopolitical_risk()
+                            market    = get_market_overview()
+                            profile   = get_user_profile()
+                            holdings  = get_portfolio()
+                            watchlist_data = get_watchlist()
+
+                            data = {
+                                "profile":           profile,
+                                "holdings":          holdings,
+                                "watchlist":         watchlist_data,
+                                "portfolio_tickers": [h["ticker"] for h in holdings],
+                                "new_pick_tickers":  [],
+                                "market":            market,
+                                "macro":             macro,
+                                "geo":               geo,
+                                "stocks":            {ticker: {**snapshot, "sentiment": sentiment}},
+                                "trigger":           "manual",
+                                "run_at":            datetime.now().isoformat(),
+                            }
+                            recs = run_pipeline(data, scope="full", tickers_override=[ticker])
+                            save_run(data, recs)
+                            write_results_json(recs, data)
+                            st.success(f"{ticker} updated")
+                            st.rerun()
+                        except Exception as ex:
+                            st.error(f"Failed: {ex}")
             st.markdown("")
+    else:
+        st.info("No stocks in watchlist.")
 
-    # Add to watchlist
-    with st.expander("➕ Add to Watchlist"):
-        w1, w2, w3 = st.columns(3)
-        with w1:
-            w_ticker = st.text_input("Ticker", key="wl_ticker").upper()
-        with w2:
-            w_name = st.text_input("Company name", key="wl_name")
-        with w3:
-            w_sector = st.text_input("Sector", key="wl_sector")
-        w_why = st.text_input("Why watching?", key="wl_why")
-        if st.button("Add to Watchlist") and w_ticker:
-            from core.database import get_connection
-            with get_connection() as conn:
-                conn.execute("""
-                    INSERT OR REPLACE INTO watchlist (ticker, company_name, sector, why_watching, is_active)
-                    VALUES (?, ?, ?, ?, 1)
-                """, (w_ticker, w_name or None, w_sector or None, w_why or None))
-            st.success(f"Added {w_ticker}!")
-            st.rerun()
+    with st.expander("➕ Add Stock to Watchlist"):
+        with st.form("add_watchlist"):
+            col_a, col_b, col_c = st.columns([1, 2, 3])
+            wl_ticker  = col_a.text_input("Ticker").upper()
+            wl_company = col_b.text_input("Company Name")
+            wl_sector  = col_c.selectbox("Sector", SECTOR_BUCKETS)
+            wl_reason  = st.text_input("Why watching (optional)")
+            if st.form_submit_button("Add") and wl_ticker:
+                from core.database import get_connection
+                with get_connection() as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO watchlist (ticker, company_name, sector, why_watching) VALUES (?,?,?,?)",
+                        (wl_ticker, wl_company, wl_sector, wl_reason)
+                    )
+                st.success(f"Added {wl_ticker}")
+                st.rerun()
+
+    st.divider()
+
+    # ── B. Sector Watch ───────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">Sector Watch</div>', unsafe_allow_html=True)
+
+    sectors_data = get_sector_watchlist()
+    sector_picks = get_sector_top_picks(n=3)
+
+    if sectors_data:
+        for s in sectors_data:
+            sname        = s["sector_name"]
+            stocks       = s.get("key_stocks") or []
+            events       = s.get("key_events") or []
+            picks        = sector_picks.get(sname, [])
+            last_analyzed = str(s.get("last_analyzed") or "")[:16]
+            expander_label = (
+                f"**{sname}** — {len(stocks)} stocks tracked"
+                + (f"  ·  last refreshed {last_analyzed}" if last_analyzed else "  ·  never refreshed")
+            )
+
+            with st.expander(expander_label, expanded=True):
+                col_left, col_right = st.columns([3, 2])
+                with col_left:
+                    st.caption(s.get("why_watching") or "")
+                    if events:
+                        st.markdown("**Key Events:**")
+                        for ev in events[:4]:
+                            st.markdown(f"  • {ev}")
+                    if stocks:
+                        st.markdown(f"**Tracking:** {', '.join(stocks)}")
+
+                with col_right:
+                    if picks:
+                        st.caption("Top picks this run:")
+                        for p in picks:
+                            action   = p.get("action", "hold")
+                            _, badge, _ = ACTION_LABELS.get(action, ("HOLD", "badge-hold", "hold"))
+                            upside   = p.get("growth_potential_pct") or 0
+                            st.markdown(
+                                f'<span class="action-badge {badge}" style="font-size:11px;">{p["ticker"]}</span>'
+                                f' {p.get("company_name","")[:20]}  '
+                                f'<span style="color:#16a34a;font-weight:700;">+{upside:.0f}%</span>',
+                                unsafe_allow_html=True
+                            )
+                    else:
+                        st.caption("Run analysis to see sector picks")
+
+                if st.button(f"↻ Refresh {sname}", key=f"refresh_sector_{sname}"):
+                    with st.spinner(f"Researching {sname} sector…"):
+                        try:
+                            from core.collectors.macro_data     import get_macro_summary
+                            from core.collectors.news_sentiment import get_geopolitical_risk
+                            from core.collectors.market_data    import get_market_overview
+                            from core.agents.base               import call_agent
+                            from core.database                  import get_connection
+                            _macro  = get_macro_summary()
+                            _geo    = get_geopolitical_risk()
+                            _market = get_market_overview()
+                            _prompt = f"""You are an equity research analyst. Sector: {sname}
+MACRO: Fed {_macro.get('fed_funds_rate','?')}%, Inflation {_macro.get('inflation_yoy','?')}%
+Geo risk: {_geo.get('risk_index',5)}/10  Market: {_market.get('_meta',{}).get('overall_sentiment','neutral')}
+Return JSON: {{"sector":"{sname}","summary":"...","tailwinds":[],"headwinds":[],"key_public_companies":[{{"ticker":"","reason":""}}],"upcoming_catalysts":[],"investment_verdict":"bullish|neutral|bearish","vs_benchmark":"..."}}"""
+                            res = call_agent("claude-sonnet-4-6", _prompt, 1500, f"SectorRefresh/{sname}")
+                            save_research_result(sname, "sector", res)
+                            with get_connection() as _conn:
+                                _conn.execute(
+                                    "UPDATE sector_watchlist SET last_analyzed=CURRENT_TIMESTAMP WHERE sector_name=?",
+                                    (sname,)
+                                )
+                            st.success(f"{sname} refreshed")
+                            st.rerun()
+                        except Exception as ex:
+                            st.error(f"Failed: {ex}")
+    else:
+        st.info("No sectors added to watchlist yet.")
+
+    with st.expander("➕ Add Sector to Watch"):
+        with st.form("add_sector"):
+            sec_name   = st.text_input("Sector Name (e.g. Space, Biotech)")
+            sec_reason = st.text_area("Why watching", height=60)
+            sec_stocks = st.text_input("Key stock tickers to track (comma-separated)")
+            sec_events = st.text_area("Key events to watch (one per line)", height=80)
+
+            if st.form_submit_button("Add Sector") and sec_name:
+                stocks_list = [t.strip().upper() for t in sec_stocks.split(",") if t.strip()]
+                events_list = [e.strip() for e in sec_events.split("\n") if e.strip()]
+                upsert_sector(sec_name, sec_reason, stocks_list, events_list)
+
+                # Auto-suggest stocks via Claude if stocks list is empty
+                if not stocks_list:
+                    st.info("Tip: run a Research on this sector to get Claude's top stock suggestions for it.")
+                st.success(f"Added sector: {sec_name}")
+                st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 5 — PROFILE / PREFERENCES
+# TAB 3 — RESEARCH
 # ═══════════════════════════════════════════════════════════════════════════════
-with tabs[4]:
-    st.markdown('<div class="section-header">Investment Profile</div>', unsafe_allow_html=True)
-    st.caption("The analysis engine uses this profile to personalize every recommendation.")
+with tab_research:
+    st.subheader("Research")
+    st.caption("On-demand deep-dive on any stock or sector. Results cached for 6 hours.")
 
-    profile = get_user_profile()
+    col_inp, col_btn, col_force = st.columns([3, 1, 1])
+    research_subject = col_inp.text_input("Ticker or sector name", placeholder="e.g. NVDA or Space").strip().upper()
+    run_research     = col_btn.button("🔍 Research", use_container_width=True)
+    force_fresh      = col_force.checkbox("Force refresh", value=False)
 
-    with st.form("profile_form"):
-        p1, p2 = st.columns(2)
-        with p1:
-            p_goal = st.text_input("Investment goal", value=profile.get("investment_goal", ""))
-            p_horizon = st.selectbox(
-                "Time horizon",
-                ["1 year", "2-3 years", "3-5 years", "5+ years"],
-                index=["1 year", "2-3 years", "3-5 years", "5+ years"].index(
-                    profile.get("time_horizon", "2-3 years")
-                    if profile.get("time_horizon") in ["1 year", "2-3 years", "3-5 years", "5+ years"]
-                    else "2-3 years"
-                )
-            )
-            p_target = st.number_input(
-                "Target return (%)",
-                min_value=0.0, max_value=10000.0, step=10.0,
-                value=float(profile.get("target_return") or 300.0),
-                help="e.g. 300 means you want to triple your money"
-            )
-        with p2:
-            p_risk = st.select_slider(
-                "Risk tolerance",
-                options=["low", "medium-low", "medium", "medium-high", "high"],
-                value=profile.get("risk_tolerance", "medium-high")
-            )
-            p_strategy = st.text_area(
-                "Strategy notes",
-                value=profile.get("strategy", ""),
-                height=80,
-                placeholder="e.g. No day trading. Hold 6+ months. Prefer AI infrastructure leaders."
-            )
+    if research_subject and run_research:
+        cached = None if force_fresh else get_research_result(research_subject, max_age_hours=6)
 
-        p_sectors = st.text_area(
-            "Preferred sectors (one per line)",
-            value="\n".join(json.loads(profile.get("preferred_sectors") or "[]")),
-            height=100,
-            help="Analysis will weight these sectors more heavily"
+        if cached:
+            st.success(f"Showing cached result from {str(cached.get('created_at',''))[:16]}")
+            result = cached.get("research", {})
+        else:
+            with st.spinner(f"Researching {research_subject}…"):
+                try:
+                    from core.collectors.market_data    import get_full_snapshot, get_market_overview
+                    from core.collectors.news_sentiment import get_full_sentiment, get_geopolitical_risk
+                    from core.collectors.macro_data     import get_macro_summary
+                    from core.agents.base               import call_agent
+
+                    # Determine if sector or stock
+                    known_sectors = {s["sector_name"].upper() for s in get_sector_watchlist()}
+                    is_sector = (research_subject in known_sectors
+                                 or research_subject in [b.upper() for b in SECTOR_BUCKETS]
+                                 or len(research_subject) > 6)
+
+                    if is_sector:
+                        # Sector research
+                        macro = get_macro_summary()
+                        geo   = get_geopolitical_risk()
+                        market = get_market_overview()
+                        prompt = f"""You are an equity research analyst. Produce a structured sector research report.
+
+SECTOR: {research_subject}
+
+MACRO: Fed Funds {macro.get('fed_funds_rate','?')}%, Inflation {macro.get('inflation_yoy','?')}%, GDP {macro.get('gdp_growth_us','?')}%
+Geo Risk: {geo.get('risk_index',5)}/10 ({geo.get('risk_level','medium')})
+Market Sentiment: {market.get('_meta',{}).get('overall_sentiment','neutral')}
+
+Return this JSON:
+{{
+  "sector": "{research_subject}",
+  "summary": "<2-3 sentences on current sector state>",
+  "macro_alignment": "positive" | "neutral" | "negative",
+  "macro_note": "<one sentence on macro impact>",
+  "tailwinds": ["tailwind1", "tailwind2", "tailwind3"],
+  "headwinds": ["headwind1", "headwind2"],
+  "key_public_companies": [
+    {{"ticker": "XX", "company": "...", "reason": "why this is the key player"}}
+  ],
+  "upcoming_catalysts": ["catalyst1", "catalyst2"],
+  "investment_verdict": "bullish" | "neutral" | "bearish",
+  "verdict_reason": "<one sentence>",
+  "vs_benchmark": "<one sentence on expected performance vs SPY/QQQ>"
+}}
+
+Return ONLY the JSON object."""
+                        result = call_agent("claude-sonnet-4-6", prompt, 2000, "Research/Sector")
+                        subject_type = "sector"
+
+                    else:
+                        # Stock research
+                        snapshot  = get_full_snapshot(research_subject)
+                        sentiment = get_full_sentiment(research_subject, snapshot.get("company_name", ""))
+                        macro     = get_macro_summary()
+                        geo       = get_geopolitical_risk()
+                        sent      = sentiment or {}
+
+                        _cp  = snapshot.get('current_price') or 0
+                        _chg = snapshot.get('change_pct_today') or 0
+                        _lo  = snapshot.get('low_52w') or 0
+                        _hi  = snapshot.get('high_52w') or 0
+                        _at  = snapshot.get('analyst_target') or 0
+                        _rsi = snapshot.get('rsi') or 50
+                        _mcd = snapshot.get('macd_histogram') or 0
+                        _s20 = snapshot.get('sma20') or 0
+                        _s50 = snapshot.get('sma50') or 0
+                        _s200= snapshot.get('sma200') or 0
+                        _ts  = snapshot.get('technical_score') or 5
+                        prompt = f"""You are an elite equity analyst. Produce a comprehensive stock research report.
+
+STOCK: {research_subject} — {snapshot.get('company_name','')} ({snapshot.get('sector','')})
+Price: ${_cp:.2f}  Day: {_chg:+.1f}%
+52w: ${_lo:.2f}–${_hi:.2f}
+Market Cap: ${(snapshot.get('market_cap') or 0)/1e9:.1f}B
+
+Fundamentals:
+- P/E: {snapshot.get('pe_ratio','N/A')}  Fwd P/E: {snapshot.get('forward_pe','N/A')}  PEG: {snapshot.get('peg_ratio','N/A')}
+- Beta: {snapshot.get('beta','N/A')}  Revenue growth: {(snapshot.get('revenue_growth') or 0)*100:.0f}%
+- Earnings growth: {(snapshot.get('earnings_growth') or 0)*100:.0f}%
+- Analyst target: ${_at:.0f}  Rec: {snapshot.get('analyst_rec','N/A')}
+
+Technicals:
+- RSI: {_rsi:.0f}  MACD hist: {_mcd:.3f}
+- SMA20: ${_s20:.2f}  SMA50: ${_s50:.2f}  SMA200: ${_s200:.2f}
+- Technical score: {_ts}/10
+
+Sentiment: News={sent.get('news_score',5)} Trends={sent.get('trends_score',5)} Direction={sent.get('trend_direction','stable')}
+Top news: {'; '.join((sent.get('top_headlines') or [])[:2])[:150]}
+
+Macro: Fed {macro.get('fed_funds_rate','?')}%, Inflation {macro.get('inflation_yoy','?')}%, Geo risk {geo.get('risk_index',5)}/10
+Next earnings: {snapshot.get('next_earnings_date','unknown')}
+
+Strategy: Maximize profit vs SPY/QQQ benchmark. Open to short-term or long-term plays.
+
+Return this JSON:
+{{
+  "ticker": "{research_subject}",
+  "company_name": "{snapshot.get('company_name','')}",
+  "sector": "{snapshot.get('sector','')}",
+  "summary": "<2-3 sentences on current situation>",
+  "bull_case": "<2 sentences>",
+  "bear_case": "<2 sentences>",
+  "action": "strong_buy|buy|hold|sell|strong_sell",
+  "confidence": <1-10>,
+  "horizon": "short|medium|long",
+  "play_type": "core|momentum|seasonal",
+  "current_price": {_cp},
+  "buy_range": [{_cp*0.95:.2f}, {_cp*1.02:.2f}],
+  "target_1yr": <float>,
+  "stop_loss": <float>,
+  "thesis": "<3 sentences max — core investment case vs SPY/QQQ>",
+  "technical_summary": "<one sentence>",
+  "macro_context": "<one sentence on macro impact>",
+  "key_risks": ["risk1", "risk2", "risk3"],
+  "key_catalysts": ["cat1", "cat2"],
+  "vs_benchmark": "<expected outperformance vs SPY/QQQ and why>"
+}}
+
+Return ONLY the JSON object."""
+                        result = call_agent("claude-sonnet-4-6", prompt, 2000, "Research/Stock")
+                        subject_type = "stock"
+
+                    save_research_result(research_subject, subject_type, result)
+                    st.success("Research complete")
+
+                except Exception as e:
+                    st.error(f"Research failed: {e}")
+                    result = {}
+
+        # ── Display results ────────────────────────────────────────────────
+        if result:
+            if result.get("sector"):
+                # Sector display
+                st.markdown(f"### {result.get('sector','')} — Sector Research")
+                verdict = result.get("investment_verdict", "neutral")
+                col_a, col_b = st.columns([3, 1])
+                col_a.markdown(result.get("summary", ""))
+                col_b.metric("Verdict", verdict.upper())
+
+                col_l, col_r = st.columns(2)
+                with col_l:
+                    st.markdown("**Tailwinds**")
+                    for t in result.get("tailwinds", []):
+                        st.markdown(f"  🟢 {t}")
+                with col_r:
+                    st.markdown("**Headwinds**")
+                    for h in result.get("headwinds", []):
+                        st.markdown(f"  🔴 {h}")
+
+                st.markdown("**Key Public Companies:**")
+                for c in result.get("key_public_companies", []):
+                    st.markdown(f"  **{c.get('ticker','')}** — {c.get('company','')} — _{c.get('reason','')}_")
+
+                st.markdown(f"**Upcoming Catalysts:** {', '.join(result.get('upcoming_catalysts', []))}")
+                st.info(f"vs Benchmark: {result.get('vs_benchmark','')}")
+                st.caption(result.get("macro_note", ""))
+
+            else:
+                # Stock display
+                action = result.get("action", "hold")
+                label, badge_cls, card_cls = ACTION_LABELS.get(action, ("HOLD", "badge-hold", "hold"))
+                h_label, h_cls = HORIZON_LABELS.get(result.get("horizon","medium"), ("Medium", "horizon-medium"))
+
+                st.markdown(f"""
+                <div class="rec-card {card_cls}" style="margin-top:12px;">
+                  <strong style="font-size:18px;">{result.get('ticker','')} — {result.get('company_name','')}</strong>
+                  <span style="color:#64748b; margin-left:8px;">{result.get('sector','')}</span><br>
+                  <span class="action-badge {badge_cls}" style="margin-top:6px;">{label}</span>
+                  <span class="horizon-badge {h_cls}">{h_label}</span>
+                  <span class="play-badge">{result.get('play_type','core')}</span>
+                </div>
+                """, unsafe_allow_html=True)
+
+                col1, col2, col3, col4 = st.columns(4)
+                br = result.get("buy_range", [None, None])
+                col1.metric("Current Price",  fmt_price(result.get("current_price")))
+                col2.metric("Buy Range",      f"{fmt_price(br[0])} – {fmt_price(br[1])}" if br else "—")
+                col3.metric("1Y Target",      fmt_price(result.get("target_1yr")))
+                col4.metric("Stop Loss",      fmt_price(result.get("stop_loss")))
+
+                st.markdown("**Thesis:**")
+                st.markdown(result.get("thesis", ""))
+
+                col_l, col_r = st.columns(2)
+                with col_l:
+                    st.markdown("**Bull Case:** " + result.get("bull_case", ""))
+                    st.markdown("**Catalysts:** " + ", ".join(result.get("key_catalysts", [])))
+                with col_r:
+                    st.markdown("**Bear Case:** " + result.get("bear_case", ""))
+                    st.markdown("**Risks:** " + ", ".join(result.get("key_risks", [])))
+
+                st.markdown(f"**Technical:** {result.get('technical_summary','')}")
+                st.markdown(f"**Macro context:** {result.get('macro_context','')}")
+                st.info(f"vs SPY/QQQ: {result.get('vs_benchmark','')}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — RECOMMENDATIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_recs:
+    st.subheader("Recommendations")
+
+    all_recs = get_latest_recommendations()
+
+    # ── Sector spotlight ──────────────────────────────────────────────────────
+    sector_picks = get_sector_top_picks(n=3)
+    if sector_picks:
+        st.markdown('<div class="section-header">Sector Spotlight — Top Picks</div>', unsafe_allow_html=True)
+        cols = st.columns(min(len(sector_picks), 4))
+        for i, (sector, picks) in enumerate(sector_picks.items()):
+            with cols[i % len(cols)]:
+                st.markdown(f"**{sector}**")
+                for p in picks:
+                    action = p.get("action", "hold")
+                    _, badge, _ = ACTION_LABELS.get(action, ("HOLD","badge-hold","hold"))
+                    upside = p.get("growth_potential_pct") or 0
+                    st.markdown(
+                        f'<span class="action-badge {badge}" style="font-size:11px;">{p["ticker"]}</span>'
+                        f' <span style="color:#16a34a;font-weight:700;">+{upside:.0f}%</span>',
+                        unsafe_allow_html=True
+                    )
+        st.divider()
+
+    # ── Run metadata ──────────────────────────────────────────────────────────
+    if all_recs:
+        run_at = all_recs[0].get("run_at", "")
+        run_at_str = str(run_at)[:16] if run_at else "—"
+        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+        try:
+            ms = json.loads(all_recs[0].get("market_summary") or "{}")
+            sentiment = ms.get("overall_sentiment", "—")
+            spy_w     = ms.get("spy_week")
+        except Exception:
+            sentiment, spy_w = "—", None
+        col_m1.metric("Analysis Time",   run_at_str)
+        col_m2.metric("Stocks Analyzed", len(all_recs))
+        col_m3.metric("Market Sentiment", sentiment.upper() if sentiment else "—")
+        col_m4.metric("SPY Week",        f"{spy_w:+.1f}%" if spy_w is not None else "—")
+
+    # ── Filters ───────────────────────────────────────────────────────────────
+    col_f1, col_f2, col_f3, col_f4 = st.columns([2, 2, 1.5, 1.5])
+    with col_f1:
+        filter_actions = st.multiselect(
+            "Action",
+            ["strong_buy", "buy", "new_pick", "hold", "sell", "strong_sell"],
+            default=["strong_buy", "buy", "new_pick"],
         )
-        p_notes = st.text_area(
-            "Personal notes for the AI",
-            value=profile.get("notes") or "",
-            height=80,
-            placeholder="Anything else you want the AI to know about your situation or preferences..."
+    with col_f2:
+        filter_horizon = st.multiselect(
+            "Horizon",
+            ["short", "medium", "long"],
+            default=["short", "medium", "long"],
         )
+    with col_f3:
+        filter_conf = st.slider("Min Confidence", 1, 10, 6)
+    with col_f4:
+        filter_play = st.multiselect("Play Type", ["core", "momentum", "seasonal"], default=["core","momentum","seasonal"])
 
-        if st.form_submit_button("💾 Save Profile", use_container_width=True):
-            sectors_list = [s.strip() for s in p_sectors.splitlines() if s.strip()]
-            update_user_profile(
-                investment_goal=p_goal,
-                time_horizon=p_horizon,
-                target_return=p_target,
-                risk_tolerance=p_risk,
-                strategy=p_strategy,
-                preferred_sectors=json.dumps(sectors_list),
-                notes=p_notes,
-            )
-            st.success("Profile saved! Next analysis run will use these preferences.")
+    # Apply filters
+    filtered = [
+        r for r in all_recs
+        if r.get("action") in filter_actions
+        and r.get("confidence", 0) >= filter_conf
+        and r.get("horizon", "medium") in filter_horizon
+        and r.get("play_type", "core") in filter_play
+    ]
 
-    # Show current profile summary
-    st.markdown("---")
-    st.subheader("Current Profile Summary")
-    current = get_user_profile()
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Target Return", f"{current.get('target_return', 0):.0f}%")
-    c2.metric("Time Horizon", current.get("time_horizon", "—"))
-    c3.metric("Risk Tolerance", current.get("risk_tolerance", "—"))
+    if not filtered and not all_recs:
+        st.info("No recommendations yet. Run the analysis pipeline first.")
+    elif not filtered:
+        st.warning(f"No recommendations match the current filters ({len(all_recs)} total in latest run).")
+    else:
+        st.caption(f"Showing {len(filtered)} of {len(all_recs)} recommendations")
+        for r in filtered:
+            render_rec_card(r)
+
+    # ── Pre-fill journal if user clicked "I followed this" ────────────────────
+    if "journal_prefill" in st.session_state:
+        prefill = st.session_state.pop("journal_prefill")
+        st.divider()
+        st.markdown("**Log this trade:**")
+        with st.form("quick_journal"):
+            col_a, col_b, col_c = st.columns(3)
+            shares = col_a.number_input("Shares", min_value=0.0, step=0.01)
+            price  = col_b.number_input("Price $", min_value=0.0, step=0.01,
+                                         value=float(prefill.get("current_price") or 0))
+            action = col_c.selectbox("Action", ["buy", "sell", "hold_noted"])
+            reason = st.text_input("Reasoning (optional)")
+            if st.form_submit_button("Log Trade") and prefill.get("ticker") and shares > 0 and price > 0:
+                log_action(prefill["ticker"], action, shares, price,
+                           was_suggested=True, rec_id=prefill.get("id"), reasoning=reason)
+                st.success(f"Logged {action} {prefill['ticker']}")
